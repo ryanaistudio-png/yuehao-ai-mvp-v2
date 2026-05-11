@@ -1,0 +1,20 @@
+{
+  "name": "yuehao-ai-mvp-v2",
+  "version": "2.0.0",
+  "description": "LINE + DeepSeek + Google Sheets booking MVP v2 for Zeabur.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@line/bot-sdk": "^9.5.0",
+    "axios": "^1.7.9",
+    "dayjs": "^1.11.13",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2"
+  }
+}
