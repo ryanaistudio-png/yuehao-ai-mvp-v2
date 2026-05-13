@@ -98,6 +98,7 @@ async function handleEvent(event) {
     const profile = await getLineProfile(userId);
     const local = extractLocalBookingData(text, config);
     adjustAmbiguousTimeWithContext(local.booking, text, session.booking, config.settings);
+    logBookingParse('LOCAL_PARSE', text, local.booking);
     const ai = shouldSkipAi(text, session, local)
       ? fallbackExtract(text, config)
       : await understandMessage(text, session, config);
@@ -137,9 +138,17 @@ async function runConversation({ userId, profile, text, ai, session, config }) {
   mergeBookingData(session.booking, ai.booking);
   mergeBookingData(session.booking, local.booking);
   clearChosenTimeForDateOrPeriodOnlyMessage(session.booking, local.booking);
+  logBookingParse('FINAL_BOOKING', text, session.booking);
 
   if (!session.booking.service) {
     session.step = 'ask_service';
+    if (session.booking.date || session.booking.time || session.booking.period) {
+      return [
+        buildPartialTimeAcknowledgement(session.booking),
+        '',
+        buildServiceOptions(config),
+      ].join('\n');
+    }
     return buildServiceOptions(config);
   }
 
@@ -424,6 +433,20 @@ function logAiDecision(text, ai, source = process.env.AI_PROVIDER || 'deepseek')
   console.log(`AI_DECISION ${JSON.stringify(summary)}`);
 }
 
+function logBookingParse(label, text, booking = {}) {
+  const summary = {
+    text: String(text || '').slice(0, 120),
+    service: booking.service || '',
+    artist: booking.artist || '',
+    date: booking.date || '',
+    time: booking.time || '',
+    period: booking.period || '',
+    customerName: booking.customerName ? '[filled]' : '',
+    phone: booking.phone ? '[filled]' : '',
+  };
+  console.log(`${label} ${JSON.stringify(summary)}`);
+}
+
 function normalizeAiJson(json) {
   return {
     intent: json.intent || 'unknown',
@@ -556,6 +579,22 @@ function buildRestartMessage() {
     '好的，已重新開始。',
     '請問您想預約，還是需要調整已有預約呢？',
   ].join('\n');
+}
+
+function buildPartialTimeAcknowledgement(booking) {
+  if (booking.date && booking.time) {
+    return `好的，我先幫您看 ${formatFriendlyDateTime(booking.date, booking.time)} 的預約。`;
+  }
+  if (booking.date && booking.period) {
+    return `好的，我先幫您看 ${booking.date} ${periodLabel(booking.period)} 的預約。`;
+  }
+  if (booking.date) {
+    return `好的，我先幫您看 ${booking.date} 的預約。`;
+  }
+  if (booking.period) {
+    return `好的，我先幫您看${periodLabel(booking.period)}的預約。`;
+  }
+  return '好的，我先幫您看可預約時段。';
 }
 
 function buildArtistOptions(config, service) {
