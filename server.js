@@ -53,33 +53,33 @@ async function handleEvent(event) {
 
     if (isResetText(text)) {
       sessions.delete(userId);
-      await replyText(event.replyToken, `好的，已重新開始。\n\n${buildServiceOptions(config)}`);
+      await safeReplyText(event, userId, `好的，已重新開始。\n\n${buildServiceOptions(config)}`);
       return;
     }
     if (isStopText(text)) {
       sessions.delete(userId);
-      await replyText(event.replyToken, '好的，先不預約。如需預約再告訴我。');
+      await safeReplyText(event, userId, '好的，先不預約。如需預約再告訴我。');
       return;
     }
     if (isGreetingText(text)) {
-      await replyText(event.replyToken, '您好，我可以協助預約、取消或查詢可預約時段。若要預約，請直接回覆「預約」。');
+      await safeReplyText(event, userId, '您好，我可以協助預約、取消或查詢可預約時段。若要預約，請直接回覆「預約」。');
       return;
     }
     if (isStartBookingText(text)) {
       sessions.delete(userId);
       session = getSession(userId, config);
       session.step = 'ask_service';
-      await replyText(event.replyToken, buildServiceOptions(config));
+      await safeReplyText(event, userId, buildServiceOptions(config));
       return;
     }
 
     const profile = await getLineProfile(userId);
     const ai = await understandMessage(text, session, config);
     const answer = await runConversation({ userId, profile, text, ai, session, config });
-    await replyText(event.replyToken, answer || '我沒有收到完整訊息，請再說一次。');
+    await safeReplyText(event, userId, answer || '我沒有收到完整訊息，請再說一次。');
   } catch (error) {
     console.error('handleEvent failed:', error);
-    await replyText(event.replyToken, '系統暫時忙碌，請稍後再試；若急著預約，請直接聯絡店家協助。');
+    await safeReplyText(event, userId, '系統暫時忙碌，請稍後再試；若急著預約，請直接聯絡店家協助。');
   }
 }
 
@@ -96,15 +96,18 @@ async function runConversation({ userId, profile, text, ai, session, config }) {
     return handleCancelFlow({ userId, text, ai, session, config });
   }
 
-  if (ai.intent === 'faq') {
+  const isActiveBookingFlow = Boolean(session.booking?.service || session.booking?.artist || session.step?.startsWith('ask_') || session.step === 'confirm_booking');
+  if (ai.intent === 'faq' && !(isActiveBookingFlow && (local.booking.date || local.booking.period || local.booking.time))) {
     return answerFaq(text, config) || config.settings.ai_fallback_reply || '這個問題我幫您請店家確認。';
   }
 
+  forceSearchCorrectionFromLocalText(ai, local);
   applyQuickReplyNumber(text, session, config);
   resetChosenTimeIfSearchChanged(session.booking, ai.booking);
   resetChosenTimeIfSearchChanged(session.booking, local.booking);
   mergeBookingData(session.booking, ai.booking);
   mergeBookingData(session.booking, local.booking);
+  clearChosenTimeForDateOrPeriodOnlyMessage(session.booking, local.booking);
 
   if (!session.booking.service) {
     session.step = 'ask_service';
@@ -173,14 +176,28 @@ async function runConversation({ userId, profile, text, ai, session, config }) {
     return '如果資訊正確，請回覆「確認預約」。如果要重來，請回覆「重來」。';
   }
 
-  const booking = await createBooking({
-    userId,
-    lineDisplayName: profile.displayName || '',
-    booking: session.booking,
-    service,
-  });
+  let booking;
+  try {
+    booking = await createBooking({
+      userId,
+      lineDisplayName: profile.displayName || '',
+      booking: session.booking,
+      service,
+    });
+  } catch (error) {
+    console.error('createBooking failed:', error.response?.data || error.message);
+    session.step = 'ask_time';
+    session.booking.time = '';
+    return [
+      '剛剛建立預約時沒有成功，可能是該時段已被預約或系統連線不穩。',
+      '',
+      buildAvailableSlots(config, session.booking.artist, service, session.booking),
+    ].join('\n');
+  }
   await lockSlots(slots, booking.bookingId);
-  await notifyShop(`新預約 ${booking.bookingId}\n客人：${booking.customerName}\n電話：${booking.phone}\n服務：${booking.service}\n美甲師：${booking.artist}\n時間：${booking.date} ${booking.time}`);
+  notifyShop(`新預約 ${booking.bookingId}\n客人：${booking.customerName}\n電話：${booking.phone}\n服務：${booking.service}\n美甲師：${booking.artist}\n時間：${booking.date} ${booking.time}`).catch((error) => {
+    console.error('notifyShop failed:', error.response?.data || error.message);
+  });
   sessions.delete(userId);
 
   return [
@@ -526,6 +543,21 @@ function extractLocalBookingData(text, config) {
   return { booking };
 }
 
+function forceSearchCorrectionFromLocalText(ai, local) {
+  if (!local?.booking) return;
+  const localChangedSearch = Boolean(local.booking.date || local.booking.period);
+  if (!localChangedSearch || local.booking.time) return;
+  if (!ai.booking) ai.booking = {};
+  ai.booking.time = '';
+}
+
+function clearChosenTimeForDateOrPeriodOnlyMessage(booking, localBooking) {
+  if (!localBooking) return;
+  if ((localBooking.date || localBooking.period) && !localBooking.time) {
+    booking.time = '';
+  }
+}
+
 function parseDateText(text) {
   const now = dayjs();
   if (text.includes('今天')) return now.format('YYYY-MM-DD');
@@ -693,6 +725,22 @@ async function replyText(replyToken, text) {
     replyToken,
     messages: [{ type: 'text', text: String(text).slice(0, 4500) }],
   });
+}
+
+async function safeReplyText(event, userId, text) {
+  try {
+    await replyText(event.replyToken, text);
+  } catch (error) {
+    console.error('replyText failed, trying pushMessage:', error.response?.data || error.message);
+    if (userId && userId.startsWith('U')) {
+      await lineClient.pushMessage({
+        to: userId,
+        messages: [{ type: 'text', text: String(text).slice(0, 4500) }],
+      });
+    } else {
+      throw error;
+    }
+  }
 }
 
 async function appsScriptRequest(action, data = {}) {
