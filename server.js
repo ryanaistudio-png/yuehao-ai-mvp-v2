@@ -4,6 +4,11 @@ const express = require('express');
 const line = require('@line/bot-sdk');
 const axios = require('axios');
 const dayjs = require('dayjs');
+const utc = require('dayjs/plugin/utc');
+const tz = require('dayjs/plugin/timezone');
+
+dayjs.extend(utc);
+dayjs.extend(tz);
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -54,8 +59,7 @@ async function handleEvent(event) {
     if (isResetText(text)) {
       sessions.delete(userId);
       cache.expiresAt = 0;
-      const freshConfig = await loadConfig();
-      await safeReplyText(event, userId, `好的，已重新開始。\n\n${buildServiceOptions(freshConfig)}`);
+      await safeReplyText(event, userId, buildRestartMessage());
       return;
     }
     if (isAbandonBookingText(text) && isActiveBookingSession(session)) {
@@ -64,7 +68,7 @@ async function handleEvent(event) {
       return;
     }
     if (isGreetingText(text)) {
-      await safeReplyText(event, userId, '您好，我可以協助預約、取消或查詢可預約時段。若要預約，請直接回覆「預約」。');
+      await safeReplyText(event, userId, '您好，我可以協助預約、調整已有預約或查詢可約時段。若要預約，請直接回覆「預約」。');
       return;
     }
     if (isStartBookingText(text)) {
@@ -93,9 +97,11 @@ async function handleEvent(event) {
 
     const profile = await getLineProfile(userId);
     const local = extractLocalBookingData(text, config);
+    adjustAmbiguousTimeWithContext(local.booking, text, session.booking, config.settings);
     const ai = shouldSkipAi(text, session, local)
       ? fallbackExtract(text, config)
       : await understandMessage(text, session, config);
+    adjustAmbiguousTimeWithContext(ai.booking, text, session.booking, config.settings);
     const answer = await runConversation({ userId, profile, text, ai, session, config });
     await safeReplyText(event, userId, answer || '我沒有收到完整訊息，請再說一次。');
   } catch (error) {
@@ -106,6 +112,8 @@ async function handleEvent(event) {
 
 async function runConversation({ userId, profile, text, ai, session, config }) {
   const local = extractLocalBookingData(text, config);
+  adjustAmbiguousTimeWithContext(local.booking, text, session.booking, config.settings);
+  adjustAmbiguousTimeWithContext(ai.booking, text, session.booking, config.settings);
   const availabilityAnswer = answerAvailabilityQuery(text, config);
   if (availabilityAnswer) return availabilityAnswer;
 
@@ -152,6 +160,15 @@ async function runConversation({ userId, profile, text, ai, session, config }) {
   if (!session.booking.artist) {
     session.step = 'ask_artist';
     return buildArtistOptions(config, service);
+  }
+
+  if (!session.booking.date && session.booking.time) {
+    const nearest = findFirstAvailableSlotAtRequestedTime(config.slots, session.booking, service, config.settings);
+    if (nearest) {
+      session.booking.date = nearest.date;
+      session.booking.time = nearest.time;
+      session.booking.artist = nearest.artist;
+    }
   }
 
   if (!session.booking.date || !session.booking.time) {
@@ -303,6 +320,7 @@ async function handleCancelFlow({ userId, text, ai, session, config }) {
 }
 
 async function understandMessage(text, session, config) {
+  const now = nowInZone();
   const prompt = [
     config.settings.ai_system_prompt || '你是約好 AI 的美甲預約助理。',
     config.settings.ai_booking_rules || '每次只問一個問題，不重複詢問已提供資訊。',
@@ -311,9 +329,12 @@ async function understandMessage(text, session, config) {
     'booking 欄位可包含 service, artist, date, time, customerName, phone, note。',
     'cancel 欄位可包含 bookingId。',
     'date 請輸出 YYYY-MM-DD；time 請輸出 HH:mm。若不確定就留空字串。',
+    '每一則訊息都要先判斷客人真正目的，不要只照前一步流程走。',
+    '如果客人說「我要改預約時間」「可以提前嗎」「改晚一點」「改約星期三」，intent 必須是 reschedule。',
     '如果客人表達提前、延後、改晚一點、改早一點、換日期、換時間、改約某天、改預約時間，intent 必須是 reschedule。',
     '如果客人問「3點可以嗎」「15號下午」「晚上有嗎」，且正在預約流程中，intent 是 booking，並盡量輸出 date/time/period。',
-    `今天日期：${dayjs().format('YYYY-MM-DD')}，時區：${timezone}`,
+    '如果客人問可預約時間，不能建議已經過去或太接近現在的時間。',
+    `目前時間：${now.format('YYYY-MM-DD HH:mm')}，時區：${timezone}`,
     `服務項目：${config.services.map((s) => `${s.name}(${s.duration}分鐘)`).join('、')}`,
     `美甲師：${config.artists.map((a) => a.name).join('、')}`,
     `目前對話狀態：${JSON.stringify(session.booking)}`,
@@ -321,31 +342,86 @@ async function understandMessage(text, session, config) {
   ].join('\n');
 
   try {
-    const response = await axios.post(
-      `${process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com'}/chat/completions`,
-      {
-        model: process.env.DEEPSEEK_MODEL || 'deepseek-chat',
-        messages: [
-          { role: 'system', content: 'You output strict JSON only.' },
-          { role: 'user', content: prompt },
-        ],
-        temperature: 0.1,
-        max_tokens: Number(config.settings.max_ai_tokens || 800),
-        response_format: { type: 'json_object' },
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${requiredEnv('DEEPSEEK_API_KEY')}`,
-          'Content-Type': 'application/json',
-        },
-        timeout: 15000,
-      }
-    );
-    return normalizeAiJson(JSON.parse(response.data.choices?.[0]?.message?.content || '{}'));
+    const raw = await callAiProvider(prompt, config);
+    const parsed = normalizeAiJson(JSON.parse(raw || '{}'));
+    logAiDecision(text, parsed);
+    return parsed;
   } catch (error) {
-    console.error('DeepSeek parse failed:', error.response?.data || error.message);
-    return fallbackExtract(text);
+    console.error('AI parse failed:', error.response?.data || error.message);
+    const fallback = fallbackExtract(text, config);
+    logAiDecision(text, fallback, 'fallback');
+    return fallback;
   }
+}
+
+async function callAiProvider(prompt, config) {
+  const provider = String(process.env.AI_PROVIDER || 'deepseek').trim().toLowerCase();
+  if (provider === 'openai') return callOpenAi(prompt, config);
+  if (provider === 'deepseek') return callDeepSeek(prompt, config);
+  throw new Error(`Unsupported AI_PROVIDER: ${provider}`);
+}
+
+async function callOpenAi(prompt, config) {
+  const response = await axios.post(
+    `${process.env.OPENAI_BASE_URL || 'https://api.openai.com'}/v1/chat/completions`,
+    {
+      model: process.env.OPENAI_MODEL || process.env.AI_MODEL || 'gpt-4.1-mini',
+      messages: [
+        { role: 'system', content: 'You output strict JSON only.' },
+        { role: 'user', content: prompt },
+      ],
+      temperature: 0.1,
+      max_tokens: Number(config.settings.max_ai_tokens || 800),
+      response_format: { type: 'json_object' },
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${requiredEnv('OPENAI_API_KEY')}`,
+        'Content-Type': 'application/json',
+      },
+      timeout: 15000,
+    }
+  );
+  return response.data.choices?.[0]?.message?.content || '{}';
+}
+
+async function callDeepSeek(prompt, config) {
+  const response = await axios.post(
+    `${process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com'}/chat/completions`,
+    {
+      model: process.env.DEEPSEEK_MODEL || process.env.AI_MODEL || 'deepseek-chat',
+      messages: [
+        { role: 'system', content: 'You output strict JSON only.' },
+        { role: 'user', content: prompt },
+      ],
+      temperature: 0.1,
+      max_tokens: Number(config.settings.max_ai_tokens || 800),
+      response_format: { type: 'json_object' },
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${requiredEnv('DEEPSEEK_API_KEY')}`,
+        'Content-Type': 'application/json',
+      },
+      timeout: 15000,
+    }
+  );
+  return response.data.choices?.[0]?.message?.content || '{}';
+}
+
+function logAiDecision(text, ai, source = process.env.AI_PROVIDER || 'deepseek') {
+  const summary = {
+    source,
+    text: String(text || '').slice(0, 120),
+    intent: ai.intent,
+    service: ai.booking?.service || '',
+    artist: ai.booking?.artist || '',
+    date: ai.booking?.date || '',
+    time: ai.booking?.time || '',
+    period: ai.booking?.period || '',
+    cancelBookingId: ai.cancel?.bookingId || '',
+  };
+  console.log(`AI_DECISION ${JSON.stringify(summary)}`);
 }
 
 function normalizeAiJson(json) {
@@ -423,7 +499,7 @@ async function createBooking({ userId, lineDisplayName, booking, service }) {
 async function loadUserActiveBookings(userId) {
   const bookings = await appsScriptRequest('getUserActiveBookings', { userId });
   return bookings
-    .filter((booking) => dayjs(`${booking.date} ${booking.start}`).isAfter(dayjs().subtract(1, 'day')))
+    .filter((booking) => parseDateTimeInZone(booking.date, booking.start).isAfter(nowInZone().subtract(1, 'day')))
     .sort((a, b) => `${a.date} ${a.start}`.localeCompare(`${b.date} ${b.start}`));
 }
 
@@ -475,6 +551,13 @@ function buildServiceOptions(config) {
   ].join('\n');
 }
 
+function buildRestartMessage() {
+  return [
+    '好的，已重新開始。',
+    '請問您想預約，還是需要調整已有預約呢？',
+  ].join('\n');
+}
+
 function buildArtistOptions(config, service) {
   const artists = artistsForService(config.artists, service);
   return [
@@ -507,8 +590,21 @@ function findAvailableStartSlots(slots, booking, service, settings, ignoreBookin
     if (!isFutureEnough(slot, settings)) return false;
     if (booking.period && !isInPeriod(slot.time, booking.period)) return false;
     return isSlotOpenForBooking(slot, ignoreBookingId);
-  });
+  }).sort(compareSlots);
   return starts.filter((slot) => findConsecutiveSlots(slots, { ...booking, date: slot.date, time: slot.time, artist: slot.artist }, service, settings, ignoreBookingId).length);
+}
+
+function findFirstAvailableSlotAtRequestedTime(slots, booking, service, settings, ignoreBookingId = '') {
+  if (!booking.time) return null;
+  return slots
+    .filter((slot) => {
+      if (booking.artist && slot.artist !== booking.artist) return false;
+      if (slot.time !== booking.time) return false;
+      if (!isFutureEnough(slot, settings)) return false;
+      return isSlotOpenForBooking(slot, ignoreBookingId);
+    })
+    .sort(compareSlots)
+    .find((slot) => findConsecutiveSlots(slots, { ...booking, date: slot.date, time: slot.time, artist: slot.artist }, service, settings, ignoreBookingId).length) || null;
 }
 
 function findConsecutiveSlots(slots, booking, service, settings, ignoreBookingId = '') {
@@ -516,6 +612,8 @@ function findConsecutiveSlots(slots, booking, service, settings, ignoreBookingId
   const needed = Math.ceil(Number(service.duration || 0) / slotMinutes);
   const start = timeToMinutes(booking.time);
   const found = [];
+
+  if (!isFutureEnough({ date: booking.date, time: booking.time }, settings)) return [];
 
   for (let i = 0; i < needed; i += 1) {
     const time = minutesToTime(start + i * slotMinutes);
@@ -555,7 +653,7 @@ function answerAvailabilityQuery(text, config) {
     || (/今天.*(在嗎|有空|可預約|可以約)/.test(text));
   if (!asksAvailability) return '';
   const local = extractLocalBookingData(text, config);
-  const date = local.booking.date || dayjs().format('YYYY-MM-DD');
+  const date = local.booking.date || nowInZone().format('YYYY-MM-DD');
   const artistName = local.booking.artist || findMentionedArtistName(text, config.artists);
 
   if (artistName && !config.artists.some((artist) => artist.name === artistName)) {
@@ -570,6 +668,7 @@ function answerAvailabilityQuery(text, config) {
   const lines = artists.map((artist) => {
     const slots = config.slots
       .filter((slot) => slot.artist === artist.name && slot.date === date && slot.status === '可預約' && !slot.lockedBookingId && isFutureEnough(slot, config.settings))
+      .sort(compareSlots)
       .slice(0, 3)
       .map((slot) => slot.time);
     return slots.length ? `${artist.name}：最近可約 ${slots.join('、')}` : `${artist.name}：目前沒有可預約空檔`;
@@ -742,7 +841,7 @@ function clearChosenTimeForDateOrPeriodOnlyMessage(booking, localBooking) {
 }
 
 function parseDateText(text) {
-  const now = dayjs();
+  const now = nowInZone();
   if (text.includes('今天')) return now.format('YYYY-MM-DD');
   if (text.includes('明天')) return now.add(1, 'day').format('YYYY-MM-DD');
   const weekday = parseWeekdayText(text);
@@ -753,8 +852,8 @@ function parseDateText(text) {
   if (slash) return resolveMonthDay(Number(slash[1]), Number(slash[2]));
   const dayOnly = text.match(/(\d{1,2})\s*(日|號)/);
   if (dayOnly) {
-    const base = dayjs();
-    let date = dayjs(`${base.year()}-${String(base.month() + 1).padStart(2, '0')}-${String(dayOnly[1]).padStart(2, '0')}`);
+    const base = nowInZone();
+    let date = parseDateOnlyInZone(base.year(), base.month() + 1, Number(dayOnly[1]));
     if (date.isBefore(base, 'day')) date = date.add(1, 'month');
     return date.format('YYYY-MM-DD');
   }
@@ -766,7 +865,7 @@ function parseWeekdayText(text) {
   if (!match) return '';
   const map = { 日: 0, 天: 0, 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6 };
   const target = map[match[3]];
-  const base = dayjs().startOf('day');
+  const base = nowInZone().startOf('day');
   const current = base.day();
   let diff = target - current;
   const prefix = match[1] || '';
@@ -776,8 +875,8 @@ function parseWeekdayText(text) {
 }
 
 function resolveMonthDay(month, day) {
-  const base = dayjs();
-  let date = dayjs(`${base.year()}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`);
+  const base = nowInZone();
+  let date = parseDateOnlyInZone(base.year(), month, day);
   if (date.isBefore(base, 'day')) date = date.add(1, 'year');
   return date.format('YYYY-MM-DD');
 }
@@ -805,6 +904,21 @@ function normalizeHourMinute(hour, minute, text) {
   return `${String(h).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
 }
 
+function adjustAmbiguousTimeWithContext(booking, text, currentBooking = {}, settings = {}) {
+  if (!booking?.time) return;
+  if (/(上午|早上|下午|晚上)/.test(text)) return;
+  const [hourText, minuteText] = booking.time.split(':');
+  let hour = Number(hourText);
+  if (!Number.isFinite(hour) || hour >= 12) return;
+
+  const contextPeriod = booking.period || currentBooking?.period || '';
+  const dayStartHour = Math.floor(timeToMinutes(settings.day_start_time || '10:00') / 60);
+  if (contextPeriod === 'afternoon' || contextPeriod === 'evening' || hour < dayStartHour) {
+    hour += 12;
+    booking.time = `${String(hour).padStart(2, '0')}:${minuteText || '00'}`;
+  }
+}
+
 function parsePeriodText(text) {
   if (text.includes('上午') || text.includes('早上')) return 'morning';
   if (text.includes('下午')) return 'afternoon';
@@ -821,8 +935,9 @@ function findMentionedArtistName(text, artists) {
 
 function isFutureEnough(slot, settings) {
   const minHours = Number(settings.min_hours_before_booking || 0);
-  const slotAt = dayjs(`${slot.date} ${slot.time}`);
-  return slotAt.isAfter(dayjs().add(minHours, 'hour'));
+  if (!slot.date || !slot.time) return false;
+  const slotAt = parseDateTimeInZone(slot.date, slot.time);
+  return slotAt.isAfter(nowInZone().add(minHours, 'hour'));
 }
 
 function isInPeriod(time, period) {
@@ -841,11 +956,12 @@ function periodLabel(period) {
 }
 
 function formatFriendlyDateTime(date, time) {
-  const target = dayjs(`${date} ${time}`);
+  const target = parseDateTimeInZone(date, time);
   if (!target.isValid()) return `${date} ${time}`;
-  const dateLabel = target.isSame(dayjs(), 'day')
+  const now = nowInZone();
+  const dateLabel = target.isSame(now, 'day')
     ? '今天'
-    : target.isSame(dayjs().add(1, 'day'), 'day')
+    : target.isSame(now.add(1, 'day'), 'day')
       ? '明天'
       : target.format('M/D');
   const hour = target.hour();
@@ -870,6 +986,22 @@ function bookingIdMatches(fullId, input) {
   const short = shortBookingId(fullId);
   const normalized = normalizeShortBookingInput(input);
   return String(fullId) === String(input).trim() || (normalized && short === normalized);
+}
+
+function nowInZone() {
+  return dayjs().tz(timezone);
+}
+
+function parseDateTimeInZone(date, time) {
+  return dayjs.tz(`${date} ${normalizeTime(time)}`, timezone);
+}
+
+function parseDateOnlyInZone(year, month, day) {
+  return dayjs.tz(`${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')} 00:00`, timezone);
+}
+
+function compareSlots(a, b) {
+  return `${a.date} ${a.time} ${a.artist || ''}`.localeCompare(`${b.date} ${b.time} ${b.artist || ''}`);
 }
 
 function findService(services, input) {
@@ -1003,7 +1135,7 @@ async function appsScriptRequest(action, data = {}) {
 function isBookingFarEnough(booking, settings) {
   const hours = Number(settings.min_hours_before_booking || 0);
   if (!hours || !booking.date || !booking.time) return true;
-  return dayjs(`${booking.date} ${booking.time}`).diff(dayjs(), 'minute') >= hours * 60;
+  return parseDateTimeInZone(booking.date, booking.time).diff(nowInZone(), 'minute') >= hours * 60;
 }
 
 function normalizeTime(value) {
@@ -1016,8 +1148,8 @@ function normalizeTime(value) {
 
 function normalizeSheetDate(value) {
   if (!value) return '';
-  if (typeof value === 'string') return dayjs(value).isValid() ? dayjs(value).format('YYYY-MM-DD') : value;
-  return dayjs(value).format('YYYY-MM-DD');
+  if (typeof value === 'string') return dayjs(value).isValid() ? dayjs(value).tz(timezone).format('YYYY-MM-DD') : value;
+  return dayjs(value).tz(timezone).format('YYYY-MM-DD');
 }
 
 function timeToMinutes(time) {
@@ -1038,8 +1170,8 @@ function isResetText(text) {
     .replace(/\s+/g, '')
     .replace(/来/g, '來')
     .replace(/[。.!！?？,，]/g, '');
-  if (['重來', '重新開始', '取消操作', '取消重來', 'reset', 'restart'].includes(normalized)) return true;
-  return /^(我要)?(重來|重新開始|取消重來)$/.test(normalized);
+  if (['重來', '重新來', '重新開始', 'reset', 'restart'].includes(normalized)) return true;
+  return /^(我要)?(重來|重新來|重新開始)$/.test(normalized);
 }
 
 function isStopText(text) {
@@ -1055,7 +1187,7 @@ function isGreetingText(text) {
 }
 
 function isRescheduleText(text) {
-  return /(改預約|更改預約|改時間|更改時間|換時間|改期|修改預約|改約|提前|延後|晚一點|早一點)/.test(text);
+  return /(改預約|更改預約|調整預約|修改預約|改時間|更改時間|換時間|調整時間|改期|改約|改到|改成|提前|提早|延後|晚一點|早一點|換日期|改日期)/.test(text);
 }
 
 function isCancelBookingRequestText(text) {

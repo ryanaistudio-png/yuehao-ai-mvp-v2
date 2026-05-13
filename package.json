@@ -1,7 +1,7 @@
 {
   "name": "yuehao-ai-mvp-v3",
-  "version": "3.1.0",
-  "description": "LINE + DeepSeek + Google Sheets booking MVP v3 for Zeabur.",
+  "version": "3.2.0",
+  "description": "LINE + AI provider adapter + Google Sheets booking MVP v3 for Zeabur.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
