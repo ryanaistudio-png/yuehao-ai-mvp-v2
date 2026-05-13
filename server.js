@@ -56,9 +56,9 @@ async function handleEvent(event) {
       await safeReplyText(event, userId, `好的，已重新開始。\n\n${buildServiceOptions(config)}`);
       return;
     }
-    if (isStopText(text)) {
+    if (isAbandonBookingText(text) && isActiveBookingSession(session)) {
       sessions.delete(userId);
-      await safeReplyText(event, userId, '好的，先不預約。如需預約再告訴我。');
+      await safeReplyText(event, userId, '好的，已取消本次預約流程。之後想預約時，請再回覆「預約」。');
       return;
     }
     if (isGreetingText(text)) {
@@ -72,9 +72,28 @@ async function handleEvent(event) {
       await safeReplyText(event, userId, buildServiceOptions(config));
       return;
     }
+    if (isRescheduleText(text)) {
+      const profile = await getLineProfile(userId);
+      const answer = await handleRescheduleFlow({ userId, text, ai: emptyAi(), local: extractLocalBookingData(text, config), session, config });
+      await safeReplyText(event, userId, answer || '我沒有收到完整訊息，請再說一次。');
+      return;
+    }
+    if (isCancelBookingRequestText(text)) {
+      const answer = await handleCancelFlow({ userId, text, ai: emptyAi(), session, config });
+      await safeReplyText(event, userId, answer || '我沒有收到完整訊息，請再說一次。');
+      return;
+    }
+    if (isStopText(text)) {
+      sessions.delete(userId);
+      await safeReplyText(event, userId, '好的，先不預約。如需預約再告訴我。');
+      return;
+    }
 
     const profile = await getLineProfile(userId);
-    const ai = await understandMessage(text, session, config);
+    const local = extractLocalBookingData(text, config);
+    const ai = shouldSkipAi(text, session, local)
+      ? fallbackExtract(text, config)
+      : await understandMessage(text, session, config);
     const answer = await runConversation({ userId, profile, text, ai, session, config });
     await safeReplyText(event, userId, answer || '我沒有收到完整訊息，請再說一次。');
   } catch (error) {
@@ -155,6 +174,10 @@ async function runConversation({ userId, profile, text, ai, session, config }) {
   }
 
   if (!session.booking.customerName || !session.booking.phone) {
+    await hydrateKnownCustomer(session, userId);
+  }
+
+  if (!session.booking.customerName || !session.booking.phone) {
     session.step = 'ask_contact';
     return '最後請留下姓名與手機，例如：王小美 0912345678。';
   }
@@ -202,7 +225,7 @@ async function runConversation({ userId, profile, text, ai, session, config }) {
 
   return [
     '預約成功！',
-    `您的預約編號是：${shortBookingId(booking.bookingId)}號`,
+    `預約編號：${shortBookingId(booking.bookingId)}`,
     '',
     `服務：${booking.service}`,
     `美甲師：${booking.artist}`,
@@ -327,9 +350,17 @@ function normalizeAiJson(json) {
   };
 }
 
-function fallbackExtract(text) {
+function emptyAi() {
+  return {
+    intent: 'unknown',
+    booking: { service: '', artist: '', date: '', time: '', customerName: '', phone: '', note: '' },
+    cancel: { bookingId: '' },
+  };
+}
+
+function fallbackExtract(text, config = { services: [], artists: [] }) {
   const phone = text.match(/09\d{8}/)?.[0] || '';
-  const local = extractLocalBookingData(text, { services: [], artists: [] });
+  const local = extractLocalBookingData(text, config);
   return {
     intent: isRescheduleText(text) ? 'reschedule' : text.includes('取消') ? 'cancel' : 'booking',
     booking: {
@@ -378,6 +409,24 @@ async function loadUserActiveBookings(userId) {
     .sort((a, b) => `${a.date} ${a.start}`.localeCompare(`${b.date} ${b.start}`));
 }
 
+async function loadCustomerProfile(userId) {
+  if (!userId || !userId.startsWith('U')) return null;
+  return appsScriptRequest('getCustomerProfile', { userId });
+}
+
+async function hydrateKnownCustomer(session, userId) {
+  if (session.customerProfileLoaded) return;
+  session.customerProfileLoaded = true;
+  try {
+    const customer = await loadCustomerProfile(userId);
+    if (!customer) return;
+    if (!session.booking.customerName && customer.customerName) session.booking.customerName = customer.customerName;
+    if (!session.booking.phone && customer.phone) session.booking.phone = customer.phone;
+  } catch (error) {
+    console.error('loadCustomerProfile failed:', error.response?.data || error.message);
+  }
+}
+
 async function cancelBooking(userId, bookingId) {
   await appsScriptRequest('cancelBooking', { userId, bookingId });
   cache.expiresAt = 0;
@@ -412,11 +461,17 @@ function buildArtistOptions(config, service) {
 
 function buildAvailableSlots(config, artist, service, booking = {}) {
   const candidates = findAvailableStartSlots(config.slots, { ...booking, artist }, service, config.settings).slice(0, 8);
-  if (!candidates.length) return '目前沒有足夠的可預約時段，請店家先重新整理可預約時段，或改其他美甲師/日期。';
+  if (!candidates.length) {
+    const scope = [
+      booking.date ? booking.date : '',
+      booking.period ? periodLabel(booking.period) : '',
+    ].filter(Boolean).join(' ');
+    return `${scope ? `${scope} ` : ''}目前沒有足夠的可預約時段，請換其他日期、時段或美甲師。`;
+  }
   return [
     `${artist} 做「${service.name}」約 ${service.duration} 分鐘，可以預約以下時段：`,
     ...candidates.map((slot, index) => `${index + 1}. ${slot.date} ${slot.time}｜${slot.artist}`),
-    '請直接回覆編號，或告訴我其他想預約的日期時間。',
+    '請直接回覆上面的編號數字，或輸入您希望的日期與時間（例如：5/20 1600）。',
   ].join('\n');
 }
 
@@ -588,6 +643,13 @@ function parseTimeText(text) {
   if (half) return normalizeHourMinute(Number(half[1]), 30, text);
   const colon = text.match(/(\d{1,2})[:：](\d{2})/);
   if (colon) return normalizeHourMinute(Number(colon[1]), Number(colon[2]), text);
+  const compact = text.match(/(?:^|[^\d])(\d{3,4})(?:$|[^\d])/);
+  if (compact && !/[/-]/.test(text)) {
+    const raw = compact[1].padStart(4, '0');
+    const hour = Number(raw.slice(0, 2));
+    const minute = Number(raw.slice(2, 4));
+    if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) return normalizeHourMinute(hour, minute, text);
+  }
   const hour = text.match(/(\d{1,2})\s*點/);
   if (hour) return normalizeHourMinute(Number(hour[1]), 0, text);
   return '';
@@ -627,6 +689,13 @@ function isInPeriod(time, period) {
   return true;
 }
 
+function periodLabel(period) {
+  if (period === 'morning') return '上午';
+  if (period === 'afternoon') return '下午';
+  if (period === 'evening') return '晚上';
+  return '';
+}
+
 function shortBookingId(id) {
   const text = String(id || '');
   return text.includes('-') ? text.split('-').pop() : String(text).padStart(3, '0');
@@ -663,6 +732,19 @@ function resetChosenTimeIfSearchChanged(current, incoming) {
   if (!incoming) return;
   const changed = ['service', 'artist', 'date', 'period'].some((key) => incoming[key] && incoming[key] !== current[key]);
   if (changed && !incoming.time) current.time = '';
+}
+
+function isActiveBookingSession(session) {
+  return Boolean(session?.booking?.service || session?.booking?.artist || session?.booking?.date || session?.booking?.time || session?.step?.startsWith('ask_') || session?.step === 'confirm_booking');
+}
+
+function shouldSkipAi(text, session, local) {
+  if (/^\d+$/.test(text.trim())) return true;
+  if (session.step === 'ask_contact' && /09\d{8}/.test(text)) return true;
+  if (isConfirmBookingText(text) || isConfirmCancelText(text)) return true;
+  if (isRescheduleText(text) || isCancelBookingRequestText(text) || isAbandonBookingText(text) || isResetText(text)) return true;
+  if (isActiveBookingSession(session) && (local.booking.date || local.booking.time || local.booking.period)) return true;
+  return false;
 }
 
 function applyQuickReplyNumber(text, session, config) {
@@ -791,11 +873,11 @@ function minutesToTime(minutes) {
 }
 
 function isResetText(text) {
-  return ['重來', '重新開始', '取消操作', 'reset'].includes(text.toLowerCase());
+  return ['重來', '重新開始', '取消操作', '取消重來', 'reset'].includes(text.trim().toLowerCase());
 }
 
 function isStopText(text) {
-  return ['算了', '先不用', '不用了', '不約了'].includes(text.trim());
+  return isAbandonBookingText(text);
 }
 
 function isStartBookingText(text) {
@@ -807,7 +889,17 @@ function isGreetingText(text) {
 }
 
 function isRescheduleText(text) {
-  return /(改預約|更改預約|改時間|改期|修改預約)/.test(text);
+  return /(改預約|更改預約|改時間|更改時間|換時間|改期|修改預約)/.test(text);
+}
+
+function isCancelBookingRequestText(text) {
+  if (isResetText(text)) return false;
+  return /(取消預約|取消我的預約|我要取消|我想取消|取消編號)/.test(text);
+}
+
+function isAbandonBookingText(text) {
+  if (isCancelBookingRequestText(text) || isResetText(text)) return false;
+  return /(算了|先不用|不用了|不約了|先不要|改天再約|下次再約|暫時不用)/.test(text.trim());
 }
 
 function isConfirmBookingText(text) {
