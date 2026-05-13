@@ -53,7 +53,9 @@ async function handleEvent(event) {
 
     if (isResetText(text)) {
       sessions.delete(userId);
-      await safeReplyText(event, userId, `好的，已重新開始。\n\n${buildServiceOptions(config)}`);
+      cache.expiresAt = 0;
+      const freshConfig = await loadConfig();
+      await safeReplyText(event, userId, `好的，已重新開始。\n\n${buildServiceOptions(freshConfig)}`);
       return;
     }
     if (isAbandonBookingText(text) && isActiveBookingSession(session)) {
@@ -178,7 +180,17 @@ async function runConversation({ userId, profile, text, ai, session, config }) {
   }
 
   if (!session.booking.customerName || !session.booking.phone) {
+    const selectedTimeThisTurn = Boolean(local.booking.time || ai.booking?.time || (session.step === 'ask_time' && /^\d+$/.test(text.trim())));
     session.step = 'ask_contact';
+    if (selectedTimeThisTurn) {
+      return [
+        `可以，先幫您保留 ${formatFriendlyDateTime(session.booking.date, session.booking.time)}。`,
+        `服務：${service.name}`,
+        `美甲師：${session.booking.artist}`,
+        '',
+        '最後請留下姓名與手機，例如：王小美 0912345678。',
+      ].join('\n');
+    }
     return '最後請留下姓名與手機，例如：王小美 0912345678。';
   }
 
@@ -247,7 +259,9 @@ async function handleCancelFlow({ userId, text, ai, session, config }) {
     try {
       await cancelBooking(userId, booking.id);
       await releaseLockedSlots(booking.id);
-      await notifyShop(`預約已取消 ${booking.id}\n客人：${booking.customer}\n服務：${booking.service}\n美甲師：${booking.artist}\n時間：${booking.date} ${booking.start}`);
+      notifyShop(`預約已取消 ${booking.id}\n客人：${booking.customer}\n服務：${booking.service}\n美甲師：${booking.artist}\n時間：${booking.date} ${booking.start}`).catch((error) => {
+        console.error('notifyShop failed:', error.response?.data || error.message);
+      });
       sessions.delete(userId);
       return `已取消預約 ${shortBookingId(booking.id)}號。`;
     } catch (error) {
@@ -297,6 +311,8 @@ async function understandMessage(text, session, config) {
     'booking 欄位可包含 service, artist, date, time, customerName, phone, note。',
     'cancel 欄位可包含 bookingId。',
     'date 請輸出 YYYY-MM-DD；time 請輸出 HH:mm。若不確定就留空字串。',
+    '如果客人表達提前、延後、改晚一點、改早一點、換日期、換時間、改約某天、改預約時間，intent 必須是 reschedule。',
+    '如果客人問「3點可以嗎」「15號下午」「晚上有嗎」，且正在預約流程中，intent 是 booking，並盡量輸出 date/time/period。',
     `今天日期：${dayjs().format('YYYY-MM-DD')}，時區：${timezone}`,
     `服務項目：${config.services.map((s) => `${s.name}(${s.duration}分鐘)`).join('、')}`,
     `美甲師：${config.artists.map((a) => a.name).join('、')}`,
@@ -343,6 +359,7 @@ function normalizeAiJson(json) {
       customerName: json.booking?.customerName || '',
       phone: json.booking?.phone || '',
       note: json.booking?.note || '',
+      period: json.booking?.period || '',
     },
     cancel: {
       bookingId: json.cancel?.bookingId || '',
@@ -353,7 +370,7 @@ function normalizeAiJson(json) {
 function emptyAi() {
   return {
     intent: 'unknown',
-    booking: { service: '', artist: '', date: '', time: '', customerName: '', phone: '', note: '' },
+    booking: { service: '', artist: '', date: '', time: '', customerName: '', phone: '', note: '', period: '' },
     cancel: { bookingId: '' },
   };
 }
@@ -371,6 +388,7 @@ function fallbackExtract(text, config = { services: [], artists: [] }) {
       customerName: phone ? text.replace(phone, '').trim() : '',
       phone,
       note: text,
+      period: local.booking.period || '',
     },
     cancel: { bookingId: text.match(/\d+/)?.[0] || '' },
   };
@@ -433,6 +451,12 @@ async function cancelBooking(userId, bookingId) {
   return bookingId;
 }
 
+async function rescheduleBooking(userId, booking) {
+  const result = await appsScriptRequest('updateBooking', { userId, booking });
+  cache.expiresAt = 0;
+  return result;
+}
+
 async function lockSlots(slots, bookingId) {
   return { slots, bookingId };
 }
@@ -442,9 +466,10 @@ async function releaseLockedSlots(bookingId) {
 }
 
 function buildServiceOptions(config) {
+  const services = Array.isArray(config.services) ? config.services : [];
   return [
     '想預約哪一項服務呢？',
-    ...config.services.map((service, index) => `${index + 1}. ${service.name}｜約 ${service.duration} 分｜NT$${service.price}`),
+    ...services.map((service, index) => `${index + 1}. ${service.name}｜約 ${service.duration} 分｜NT$${service.price}`),
     '如果還不知道款式，可以選「款式諮詢/簡易服務」。',
     '請直接回覆編號。',
   ].join('\n');
@@ -475,18 +500,18 @@ function buildAvailableSlots(config, artist, service, booking = {}) {
   ].join('\n');
 }
 
-function findAvailableStartSlots(slots, booking, service, settings) {
+function findAvailableStartSlots(slots, booking, service, settings, ignoreBookingId = '') {
   const starts = slots.filter((slot) => {
     if (booking.artist && slot.artist !== booking.artist) return false;
     if (booking.date && slot.date !== booking.date) return false;
     if (!isFutureEnough(slot, settings)) return false;
     if (booking.period && !isInPeriod(slot.time, booking.period)) return false;
-    return slot.status === '可預約' && !slot.lockedBookingId;
+    return isSlotOpenForBooking(slot, ignoreBookingId);
   });
-  return starts.filter((slot) => findConsecutiveSlots(slots, { ...booking, date: slot.date, time: slot.time, artist: slot.artist }, service, settings).length);
+  return starts.filter((slot) => findConsecutiveSlots(slots, { ...booking, date: slot.date, time: slot.time, artist: slot.artist }, service, settings, ignoreBookingId).length);
 }
 
-function findConsecutiveSlots(slots, booking, service, settings) {
+function findConsecutiveSlots(slots, booking, service, settings, ignoreBookingId = '') {
   const slotMinutes = Number(settings.slot_minutes || 30);
   const needed = Math.ceil(Number(service.duration || 0) / slotMinutes);
   const start = timeToMinutes(booking.time);
@@ -498,13 +523,17 @@ function findConsecutiveSlots(slots, booking, service, settings) {
       item.artist === booking.artist
       && item.date === booking.date
       && item.time === time
-      && item.status === '可預約'
-      && !item.lockedBookingId
+      && isSlotOpenForBooking(item, ignoreBookingId)
     ));
     if (!slot) return [];
     found.push(slot);
   }
   return found;
+}
+
+function isSlotOpenForBooking(slot, ignoreBookingId = '') {
+  if (slot.status === '可預約' && !slot.lockedBookingId) return true;
+  return Boolean(ignoreBookingId && slot.lockedBookingId && String(slot.lockedBookingId) === String(ignoreBookingId));
 }
 
 function answerFaq(text, config) {
@@ -557,7 +586,41 @@ async function handleRescheduleFlow({ userId, text, ai, local, session, config }
   const bookings = await loadUserActiveBookings(userId);
   if (!bookings.length) {
     session.step = 'start';
-    return '目前沒有找到你尚未完成的預約。若是店家代訂，請直接聯絡店家協助。';
+    session.booking = { service: '', artist: '', date: '', time: '', customerName: '', phone: '', note: '' };
+    return [
+      '目前系統沒有查到您的預約資料。',
+      '如果您想重新預約，我現在可以協助您。',
+      '',
+      buildServiceOptions(config),
+    ].join('\n');
+  }
+
+  if (session.step === 'reschedule_confirm' && isConfirmRescheduleText(text)) {
+    const draft = session.rescheduleDraft;
+    if (!draft) {
+      session.step = 'reschedule_select';
+      return '修改資訊已過期，請重新選擇要更改的預約。';
+    }
+    try {
+      const result = await rescheduleBooking(userId, draft);
+      notifyShop(`預約已修改 ${result.bookingId}\n客人：${result.customerName}\n服務：${result.service}\n美甲師：${result.artist}\n時間：${result.date} ${result.time}`).catch((error) => {
+        console.error('notifyShop failed:', error.response?.data || error.message);
+      });
+      sessions.delete(userId);
+      return [
+        '已修改預約！',
+        `預約編號：${shortBookingId(result.bookingId)}`,
+        `服務：${result.service}`,
+        `美甲師：${result.artist}`,
+        `時間：${result.date} ${result.time}`,
+      ].join('\n');
+    } catch (error) {
+      session.step = 'reschedule_change';
+      return [
+        `修改失敗：${error.message}`,
+        '請換其他日期或時間，我會再幫您確認。',
+      ].join('\n');
+    }
   }
 
   const bookingId = normalizeShortBookingInput(text);
@@ -565,7 +628,9 @@ async function handleRescheduleFlow({ userId, text, ai, local, session, config }
   if (!target && !session.rescheduleBooking) {
     session.step = 'reschedule_select';
     return [
-      '你目前有以下預約：',
+      '您是想更改已預約的時間嗎？我先幫您查詢目前的預約。',
+      '',
+      '您目前有以下預約：',
       ...bookings.map((booking) => `預約編號 ${shortBookingId(booking.id)}號：${booking.date} ${booking.start}｜${booking.artist}｜${booking.service}`),
       '請回覆要更改的預約編號，例如「006」。',
     ].join('\n');
@@ -573,13 +638,76 @@ async function handleRescheduleFlow({ userId, text, ai, local, session, config }
 
   if (target) session.rescheduleBooking = target;
   const booking = session.rescheduleBooking;
+  if (session.step === 'reschedule_change' && /^\d+$/.test(text.trim()) && Array.isArray(session.rescheduleSlotOptions)) {
+    const slot = session.rescheduleSlotOptions[Number(text.trim()) - 1];
+    if (slot) {
+      session.rescheduleChange.date = slot.date;
+      session.rescheduleChange.time = slot.time;
+      session.rescheduleChange.artist = slot.artist;
+    }
+  }
   mergeBookingData(session.rescheduleChange, ai.booking);
   mergeBookingData(session.rescheduleChange, local.booking);
 
+  const change = session.rescheduleChange || {};
+  const next = {
+    bookingId: booking.id,
+    service: change.service || booking.service,
+    artist: change.artist || booking.artist,
+    date: change.date || booking.date,
+    time: change.time || booking.start,
+  };
+
+  if (!change.service && !change.artist && !change.date && !change.time && !change.period) {
+    session.step = 'reschedule_change';
+    return [
+      `我找到預約編號 ${shortBookingId(booking.id)}號：${booking.date} ${booking.start}｜${booking.artist}｜${booking.service}`,
+      '請告訴我想改成什麼時間或內容，例如「改到 5/20 下午 4 點」。',
+    ].join('\n');
+  }
+
+  const service = findService(config.services, next.service);
+  if (!service) {
+    session.rescheduleChange.service = '';
+    return `目前沒有找到「${next.service}」這個服務，請重新告訴我想改成哪一項服務。`;
+  }
+
+  const artist = config.artists.find((item) => item.name === next.artist);
+  if (!artist) {
+    session.rescheduleChange.artist = '';
+    return `目前沒有找到「${next.artist}」這位美甲師，請重新告訴我想改成哪位美甲師。`;
+  }
+
+  if (!next.date || !next.time) {
+    session.step = 'reschedule_change';
+    return [
+      `我找到預約編號 ${shortBookingId(booking.id)}號：${booking.date} ${booking.start}｜${booking.artist}｜${booking.service}`,
+      '請告訴我想改到哪一天、幾點，例如「5/20 1600」或「星期三下午」。',
+    ].join('\n');
+  }
+
+  const slots = findConsecutiveSlots(config.slots, next, service, config.settings, booking.id);
+  if (!isBookingFarEnough(next, config.settings) || !slots.length) {
+    session.step = 'reschedule_change';
+    const suggestions = findAvailableStartSlots(config.slots, { artist: next.artist, date: next.date, period: change.period || '' }, service, config.settings, booking.id).slice(0, 6);
+    session.rescheduleSlotOptions = suggestions;
+    return [
+      `${next.date} ${next.time} 目前沒有足夠完成「${service.name}」的連續空檔。`,
+      suggestions.length ? '以下是附近可約時間：' : '請換其他日期或時段。',
+      ...suggestions.map((slot, index) => `${index + 1}. ${slot.date} ${slot.time}｜${slot.artist}`),
+      suggestions.length ? '請直接回覆編號，或輸入其他日期時間。' : '',
+    ].filter(Boolean).join('\n');
+  }
+
+  session.step = 'reschedule_confirm';
+  session.rescheduleDraft = next;
   return [
-    `我找到預約編號 ${shortBookingId(booking.id)}號：${booking.date} ${booking.start}｜${booking.artist}｜${booking.service}`,
-    '改預約功能下一步會支援直接改服務、美甲師與時間。',
-    '目前請先聯絡店家協助修改，或回覆「取消預約」重新預約。',
+    `是否將預約 ${shortBookingId(booking.id)}號修改為以下內容？`,
+    '',
+    `原本：${booking.date} ${booking.start}｜${booking.artist}｜${booking.service}`,
+    `改成：${next.date} ${next.time}｜${next.artist}｜${service.name}`,
+    '',
+    '確認請回覆「確認修改」。',
   ].join('\n');
 }
 
@@ -617,6 +745,8 @@ function parseDateText(text) {
   const now = dayjs();
   if (text.includes('今天')) return now.format('YYYY-MM-DD');
   if (text.includes('明天')) return now.add(1, 'day').format('YYYY-MM-DD');
+  const weekday = parseWeekdayText(text);
+  if (weekday) return weekday;
   const monthDay = text.match(/(\d{1,2})\s*月\s*(\d{1,2})\s*(日|號)?/);
   if (monthDay) return resolveMonthDay(Number(monthDay[1]), Number(monthDay[2]));
   const slash = text.match(/(\d{1,2})[/-](\d{1,2})/);
@@ -629,6 +759,20 @@ function parseDateText(text) {
     return date.format('YYYY-MM-DD');
   }
   return '';
+}
+
+function parseWeekdayText(text) {
+  const match = text.match(/(下週|下禮拜|這週|這禮拜|本週|本禮拜)?\s*(週|星期|禮拜)([一二三四五六日天])/);
+  if (!match) return '';
+  const map = { 日: 0, 天: 0, 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6 };
+  const target = map[match[3]];
+  const base = dayjs().startOf('day');
+  const current = base.day();
+  let diff = target - current;
+  const prefix = match[1] || '';
+  if (prefix.includes('下')) diff += 7;
+  if (!prefix && diff < 0) diff += 7;
+  return base.add(diff, 'day').format('YYYY-MM-DD');
 }
 
 function resolveMonthDay(month, day) {
@@ -696,6 +840,21 @@ function periodLabel(period) {
   return '';
 }
 
+function formatFriendlyDateTime(date, time) {
+  const target = dayjs(`${date} ${time}`);
+  if (!target.isValid()) return `${date} ${time}`;
+  const dateLabel = target.isSame(dayjs(), 'day')
+    ? '今天'
+    : target.isSame(dayjs().add(1, 'day'), 'day')
+      ? '明天'
+      : target.format('M/D');
+  const hour = target.hour();
+  const period = hour < 12 ? '上午' : hour < 18 ? '下午' : '晚上';
+  const displayHour = hour > 12 ? hour - 12 : hour;
+  const minute = target.minute() ? `:${String(target.minute()).padStart(2, '0')}` : '點';
+  return `${dateLabel}${period}${displayHour}${minute}`;
+}
+
 function shortBookingId(id) {
   const text = String(id || '');
   return text.includes('-') ? text.split('-').pop() : String(text).padStart(3, '0');
@@ -741,7 +900,7 @@ function isActiveBookingSession(session) {
 function shouldSkipAi(text, session, local) {
   if (/^\d+$/.test(text.trim())) return true;
   if (session.step === 'ask_contact' && /09\d{8}/.test(text)) return true;
-  if (isConfirmBookingText(text) || isConfirmCancelText(text)) return true;
+  if (isConfirmBookingText(text) || isConfirmCancelText(text) || isConfirmRescheduleText(text)) return true;
   if (isRescheduleText(text) || isCancelBookingRequestText(text) || isAbandonBookingText(text) || isResetText(text)) return true;
   if (isActiveBookingSession(session) && (local.booking.date || local.booking.time || local.booking.period)) return true;
   return false;
@@ -873,7 +1032,14 @@ function minutesToTime(minutes) {
 }
 
 function isResetText(text) {
-  return ['重來', '重新開始', '取消操作', '取消重來', 'reset'].includes(text.trim().toLowerCase());
+  const normalized = String(text || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '')
+    .replace(/来/g, '來')
+    .replace(/[。.!！?？,，]/g, '');
+  if (['重來', '重新開始', '取消操作', '取消重來', 'reset', 'restart'].includes(normalized)) return true;
+  return /^(我要)?(重來|重新開始|取消重來)$/.test(normalized);
 }
 
 function isStopText(text) {
@@ -889,7 +1055,7 @@ function isGreetingText(text) {
 }
 
 function isRescheduleText(text) {
-  return /(改預約|更改預約|改時間|更改時間|換時間|改期|修改預約)/.test(text);
+  return /(改預約|更改預約|改時間|更改時間|換時間|改期|修改預約|改約|提前|延後|晚一點|早一點)/.test(text);
 }
 
 function isCancelBookingRequestText(text) {
@@ -908,6 +1074,10 @@ function isConfirmBookingText(text) {
 
 function isConfirmCancelText(text) {
   return ['確認取消', '確定取消', '取消沒錯'].includes(text.trim());
+}
+
+function isConfirmRescheduleText(text) {
+  return ['確認修改', '確定修改', '確認改期', '確認更改', '修改沒錯'].includes(text.trim());
 }
 
 function requiredEnv(name) {
