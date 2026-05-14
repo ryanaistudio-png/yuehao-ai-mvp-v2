@@ -159,7 +159,7 @@ async function runConversation({ userId, profile, text, ai, session, config, loc
   if (confirmationAnswer) return confirmationAnswer;
 
   if (isSlotRefinementText(text, session)) {
-    applySlotRefinementText(text, session);
+    applySlotRefinementText(text, session, local.booking);
     const service = findService(config.services, session.booking.service);
     if (service && session.booking.artist) {
       session.step = 'ask_time';
@@ -234,6 +234,17 @@ async function runConversation({ userId, profile, text, ai, session, config, loc
 
   if (!session.booking.date || !session.booking.time) {
     session.step = 'ask_time';
+    const alternatives = findAlternativeArtistSlots(config, session.booking, service);
+    if (session.booking.artist && session.booking.date && !findAvailableStartSlots(config.slots, session.booking, service, config.settings).length && alternatives.length) {
+      const unavailableArtist = session.booking.artist;
+      session.booking.artist = '';
+      session.step = 'ask_artist';
+      return [
+        `${session.booking.date} ${unavailableArtist} 目前沒有足夠的可預約時段，可以換其他美甲師。`,
+        '',
+        buildArtistOptions(config, service),
+      ].join('\n');
+    }
     return buildAvailableSlots(config, session.booking.artist, service, session.booking);
   }
 
@@ -661,25 +672,30 @@ function buildServiceGroups(services = []) {
 }
 
 function formatServiceGroupNames(services = []) {
-  return services.map((service) => {
-    const name = service.name || '';
-    return isFreeService(service) ? `${name}（免費）` : name;
-  }).join(' / ');
+  return services.map((service) => formatServiceMenuName(service)).join(' / ');
 }
 
 function buildServiceDetailOptions(group) {
   if (!group?.services?.length) return '請重新選擇服務項目。';
   return [
     `請問您要預約哪一項？`,
-    ...group.services.map((service, index) => `${index + 1}. ${isFreeService(service) ? `${service.name}（免費）` : service.name}`),
+    ...group.services.map((service, index) => `${index + 1}. ${formatServiceMenuName(service)}`),
     restartOptionLine(),
     '請直接回覆編號。',
   ].join('\n');
 }
 
+function formatServiceMenuName(service = {}) {
+  const name = service.name || '';
+  if (!isFreeService(service)) return name;
+  if (name.includes('款式諮詢/簡易服務')) return name.replace('款式諮詢/簡易服務', '款式諮詢（免費）/簡易服務');
+  if (name.includes('款式咨詢/簡易服務')) return name.replace('款式咨詢/簡易服務', '款式咨詢（免費）/簡易服務');
+  return `${name}（免費）`;
+}
+
 function isFreeService(service = {}) {
   const price = String(service.price ?? '').trim();
-  return service.name?.includes('款式諮詢') || service.name?.includes('諮詢') || price === '0' || price === '免費';
+  return service.name?.includes('款式諮詢') || service.name?.includes('款式咨詢') || service.name?.includes('諮詢') || service.name?.includes('咨詢') || price === '0' || price === '免費';
 }
 
 function buildRestartMessage() {
@@ -766,8 +782,11 @@ function isSlotRefinementText(text, session) {
   return /(晚一點|晚點|晚些|更晚|晚上的?|下午|午後|早一點|早點|早些|更早|上午|早上|中午)/.test(text);
 }
 
-function applySlotRefinementText(text, session) {
+function applySlotRefinementText(text, session, localBooking = {}) {
   if (!session.booking) return;
+  if (localBooking.date) session.booking.date = localBooking.date;
+  if (localBooking.time) session.booking.time = localBooking.time;
+  if (localBooking.artist) session.booking.artist = localBooking.artist;
   const period = parsePeriodText(text) || (
     /(晚一點|晚點|晚些|更晚|晚上的?)/.test(text)
       ? 'evening'
@@ -776,7 +795,7 @@ function applySlotRefinementText(text, session) {
         : ''
   );
   if (period) session.booking.period = period;
-  session.booking.time = '';
+  if (period && !localBooking.time) session.booking.time = '';
 }
 
 function findAvailableStartSlots(slots, booking, service, settings, ignoreBookingId = '') {
@@ -788,6 +807,17 @@ function findAvailableStartSlots(slots, booking, service, settings, ignoreBookin
     return isSlotOpenForBooking(slot, ignoreBookingId);
   }).sort(compareSlots);
   return starts.filter((slot) => findConsecutiveSlots(slots, { ...booking, date: slot.date, time: slot.time, artist: slot.artist }, service, settings, ignoreBookingId).length);
+}
+
+function findAlternativeArtistSlots(config, booking, service) {
+  if (!booking.date || !service) return [];
+  return (config.artists || [])
+    .filter((artist) => artist.name !== booking.artist)
+    .map((artist) => ({
+      artist: artist.name,
+      slots: findAvailableStartSlots(config.slots, { ...booking, artist: artist.name }, service, config.settings),
+    }))
+    .filter((item) => item.slots.length);
 }
 
 function findFirstAvailableSlotAtRequestedTime(slots, booking, service, settings, ignoreBookingId = '') {
