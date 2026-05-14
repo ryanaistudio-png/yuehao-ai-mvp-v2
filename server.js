@@ -62,11 +62,27 @@ async function handleEvent(event) {
       await safeReplyText(event, userId, buildRestartMessage());
       return;
     }
+    if (isRestartOptionNumber(text, session)) {
+      sessions.delete(userId);
+      cache.expiresAt = 0;
+      await safeReplyText(event, userId, buildRestartMessage());
+      return;
+    }
     if (isAbandonBookingText(text) && (isActiveBookingSession(session) || session.step?.startsWith('cancel') || session.step?.startsWith('reschedule'))) {
       sessions.delete(userId);
       await safeReplyText(event, userId, '好的，已取消本次流程。之後需要預約或調整時，請再告訴我。');
       return;
     }
+    const local = extractLocalBookingData(text, config);
+    adjustAmbiguousTimeWithContext(local.booking, text, session.booking, config.settings);
+    logBookingParse('LOCAL_PARSE', text, local.booking);
+
+    const complexAnswer = await handleComplexOrMultiPersonRequest({ userId, text, session, config, local });
+    if (complexAnswer) {
+      await safeReplyText(event, userId, complexAnswer);
+      return;
+    }
+
     if (isGreetingText(text)) {
       await safeReplyText(event, userId, '您好，我可以協助預約、調整已有預約或查詢可約時段。若要預約，請直接回覆「預約」。');
       return;
@@ -89,6 +105,12 @@ async function handleEvent(event) {
       await safeReplyText(event, userId, answer || '我沒有收到完整訊息，請再說一次。');
       return;
     }
+    if (isStepOptionNumber(text, session)) {
+      const profile = await getLineProfile(userId);
+      const answer = await handleOptionNumberSelection({ userId, profile, text, session, config });
+      await safeReplyText(event, userId, answer || '我沒有收到完整訊息，請再說一次。');
+      return;
+    }
     if (isStopText(text)) {
       sessions.delete(userId);
       await safeReplyText(event, userId, '好的，先不預約。如需預約再告訴我。');
@@ -96,14 +118,22 @@ async function handleEvent(event) {
     }
 
     const profile = await getLineProfile(userId);
-    const local = extractLocalBookingData(text, config);
-    adjustAmbiguousTimeWithContext(local.booking, text, session.booking, config.settings);
-    logBookingParse('LOCAL_PARSE', text, local.booking);
     const ai = shouldSkipAi(text, session, local)
       ? fallbackExtract(text, config)
       : await understandMessage(text, session, config);
     adjustAmbiguousTimeWithContext(ai.booking, text, session.booking, config.settings);
-    const answer = await runConversation({ userId, profile, text, ai, session, config });
+    if (ai.intent === 'multi_person') {
+      const complexByAi = await handleComplexOrMultiPersonRequest({ userId, text, session, config, local });
+      if (!complexByAi) {
+        sessions.delete(userId);
+        notifyShop(`需要店家確認的多人預約需求\n客人來源：${userId}\n訊息：${text}`).catch((error) => {
+          console.error('notifyShop failed:', error.response?.data || error.message);
+        });
+      }
+      await safeReplyText(event, userId, complexByAi || '多人同行或同時指定多位美甲師，需要店家確認後才能安排。我已先幫您通知店家。');
+      return;
+    }
+    const answer = await runConversation({ userId, profile, text, ai, session, config, local });
     await safeReplyText(event, userId, answer || '我沒有收到完整訊息，請再說一次。');
   } catch (error) {
     console.error('handleEvent failed:', error);
@@ -111,8 +141,9 @@ async function handleEvent(event) {
   }
 }
 
-async function runConversation({ userId, profile, text, ai, session, config }) {
-  const local = extractLocalBookingData(text, config);
+async function runConversation({ userId, profile, text, ai, session, config, local: providedLocal }) {
+  ai = ai || emptyAi();
+  const local = providedLocal || extractLocalBookingData(text, config);
   adjustAmbiguousTimeWithContext(local.booking, text, session.booking, config.settings);
   adjustAmbiguousTimeWithContext(ai.booking, text, session.booking, config.settings);
   const businessDateAnswer = answerBusinessDateQuery(text, config);
@@ -123,6 +154,9 @@ async function runConversation({ userId, profile, text, ai, session, config }) {
   if (priceAnswer) return priceAnswer;
   const availabilityAnswer = answerAvailabilityQuery(text, config, session, local);
   if (availabilityAnswer) return availabilityAnswer;
+
+  const confirmationAnswer = answerAiConfirmation(ai, session, local);
+  if (confirmationAnswer) return confirmationAnswer;
 
   if (isSlotRefinementText(text, session)) {
     applySlotRefinementText(text, session);
@@ -351,15 +385,19 @@ async function understandMessage(text, session, config) {
     config.settings.ai_system_prompt || '你是約好 AI 的美甲預約助理。',
     config.settings.ai_booking_rules || '每次只問一個問題，不重複詢問已提供資訊。',
     '請只輸出 JSON，不要加任何解釋。',
-    '可用 intent: booking, cancel, reschedule, faq, unknown。',
+    '可用 intent: booking, cancel, reschedule, faq, price, availability, artist_status, multi_person, unknown。',
     'booking 欄位可包含 service, artist, date, time, customerName, phone, note。',
     'cancel 欄位可包含 bookingId。',
-    'date 請輸出 YYYY-MM-DD；time 請輸出 HH:mm。若不確定就留空字串。',
-    '每一則訊息都要先判斷客人真正目的，不要只照前一步流程走。',
+    '另可輸出 confidence(0到1), needsConfirmation(boolean), confirmationQuestion(string), peopleCount(number), artists(array)。',
+    'date 請輸出 YYYY-MM-DD；time 請輸出 HH:mm；若只有上午/下午/晚上，請放 period。若不確定就留空字串。',
+    '每一則訊息都要先判斷客人真正目的，不要只照前一步流程走；AI 只負責理解，最後是否能預約由程式判斷。',
     '如果客人說「我要改預約時間」「可以提前嗎」「改晚一點」「改約星期三」，intent 必須是 reschedule。',
     '如果客人表達提前、延後、改晚一點、改早一點、換日期、換時間、改約某天、改預約時間，intent 必須是 reschedule。',
+    '如果客人說「取消預約」「我要取消預約」「取消006」，intent 是 cancel；如果只是「算了」「不約了」「取消」可能是放棄本次流程。',
     '如果客人問「3點可以嗎」「15號下午」「晚上有嗎」，且正在預約流程中，intent 是 booking，並盡量輸出 date/time/period。',
+    '如果客人同時提到兩位美甲師、兩個人、雙人、朋友一起做，intent 必須是 multi_person。',
     '如果客人問可預約時間，不能建議已經過去或太接近現在的時間。',
+    '如果語意不明，intent 用 unknown，needsConfirmation=true，confirmationQuestion 用一句中文向客人確認，不要硬猜。',
     `目前時間：${now.format('YYYY-MM-DD HH:mm')}，時區：${timezone}`,
     `服務項目：${config.services.map((s) => `${s.name}(${s.duration}分鐘)`).join('、')}`,
     `美甲師：${config.artists.map((a) => a.name).join('、')}`,
@@ -446,6 +484,8 @@ function logAiDecision(text, ai, source = process.env.AI_PROVIDER || 'deepseek')
     time: ai.booking?.time || '',
     period: ai.booking?.period || '',
     cancelBookingId: ai.cancel?.bookingId || '',
+    confidence: ai.confidence || 0,
+    needsConfirmation: Boolean(ai.needsConfirmation),
   };
   console.log(`AI_DECISION ${JSON.stringify(summary)}`);
 }
@@ -467,6 +507,11 @@ function logBookingParse(label, text, booking = {}) {
 function normalizeAiJson(json) {
   return {
     intent: json.intent || 'unknown',
+    confidence: Number(json.confidence || 0),
+    needsConfirmation: Boolean(json.needsConfirmation),
+    confirmationQuestion: json.confirmationQuestion || '',
+    peopleCount: Number(json.peopleCount || 0),
+    artists: Array.isArray(json.artists) ? json.artists : [],
     booking: {
       service: json.booking?.service || '',
       artist: json.booking?.artist || '',
@@ -486,6 +531,11 @@ function normalizeAiJson(json) {
 function emptyAi() {
   return {
     intent: 'unknown',
+    confidence: 0,
+    needsConfirmation: false,
+    confirmationQuestion: '',
+    peopleCount: 0,
+    artists: [],
     booking: { service: '', artist: '', date: '', time: '', customerName: '', phone: '', note: '', period: '' },
     cancel: { bookingId: '' },
   };
@@ -496,6 +546,11 @@ function fallbackExtract(text, config = { services: [], artists: [] }) {
   const local = extractLocalBookingData(text, config);
   return {
     intent: isRescheduleText(text) ? 'reschedule' : text.includes('取消') ? 'cancel' : 'booking',
+    confidence: 0,
+    needsConfirmation: false,
+    confirmationQuestion: '',
+    peopleCount: isMultiPersonBookingText(text) ? 2 : 0,
+    artists: findMentionedArtists(text, config.artists),
     booking: {
       service: local.booking.service || '',
       artist: local.booking.artist || '',
@@ -586,6 +641,7 @@ function buildServiceOptions(config) {
   return [
     '想預約哪一類服務呢？',
     ...groups.map((group, index) => `${index + 1}. 約 ${group.duration} 分鐘｜${formatServiceGroupNames(group.services)}`),
+    restartOptionLine(),
     '如果還不知道款式，可以選「款式諮詢/簡易服務」。',
     '請直接回覆編號。',
   ].join('\n');
@@ -616,6 +672,7 @@ function buildServiceDetailOptions(group) {
   return [
     `請問您要預約哪一項？`,
     ...group.services.map((service, index) => `${index + 1}. ${isFreeService(service) ? `${service.name}（免費）` : service.name}`),
+    restartOptionLine(),
     '請直接回覆編號。',
   ].join('\n');
 }
@@ -654,6 +711,7 @@ function buildArtistOptions(config, service) {
   return [
     `想指定哪位美甲師做「${service.name}」嗎？`,
     ...artists.map((artist, index) => showSpecialty && artist.note ? `${index + 1}. ${artist.name}｜${artist.note}` : `${index + 1}. ${artist.name}`),
+    restartOptionLine(),
     '請直接回覆編號。',
   ].join('\n');
 }
@@ -661,17 +719,45 @@ function buildArtistOptions(config, service) {
 function buildAvailableSlots(config, artist, service, booking = {}) {
   const candidates = findAvailableStartSlots(config.slots, { ...booking, artist }, service, config.settings).slice(0, 8);
   if (!candidates.length) {
-    const scope = [
-      booking.date ? booking.date : '',
-      booking.period ? periodLabel(booking.period) : '',
-    ].filter(Boolean).join(' ');
-    return `${scope ? `${scope} ` : ''}目前沒有足夠的可預約時段，請換其他日期、時段或美甲師。`;
+    return buildNoAvailableSlotsMessage(config, artist, service, booking);
   }
   return [
     `${artist} 做「${service.name}」約 ${service.duration} 分鐘，可以預約以下時段：`,
     ...candidates.map((slot, index) => `${index + 1}. ${slot.date} ${slot.time}｜${slot.artist}`),
+    restartOptionLine(),
     '請直接回覆上面的編號數字，或輸入您希望的日期與時間（例如：5/20 1600）。',
   ].join('\n');
+}
+
+function restartOptionLine() {
+  return '0. 重新開始';
+}
+
+function buildNoAvailableSlotsMessage(config, artist, service, booking = {}) {
+  const scope = [
+    booking.date ? booking.date : '',
+    booking.period ? periodLabel(booking.period) : '',
+  ].filter(Boolean).join(' ');
+  const prefix = scope ? `${scope} ` : '';
+
+  if (booking.date) {
+    const daySlots = (config.slots || []).filter((slot) => slot.date === booking.date);
+    if (!daySlots.length) {
+      return `${booking.date} 目前沒有開放預約，可能是店休、休假日或班表尚未建立。請換其他日期。`;
+    }
+
+    const artistDaySlots = daySlots.filter((slot) => slot.artist === artist);
+    if (!artistDaySlots.length) {
+      return `${booking.date} ${artist} 休假或未開放預約，請換其他日期、時段或美甲師。`;
+    }
+
+    const openSlots = artistDaySlots.filter((slot) => isSlotOpenForBooking(slot) && isFutureEnough(slot, config.settings));
+    if (!openSlots.length) {
+      return `${prefix}${artist} 目前沒有可預約空檔，可能已滿、休假或已超過可預約時間。請換其他日期、時段或美甲師。`;
+    }
+  }
+
+  return `${prefix}目前沒有足夠完成「${service.name}」的連續空檔，請換其他日期、時段或美甲師。`;
 }
 
 function isSlotRefinementText(text, session) {
@@ -797,6 +883,66 @@ function formatServicePrice(service = {}) {
   const price = String(service.price ?? '').trim();
   if (!price) return '請店家確認';
   return /^\d+$/.test(price) ? `NT$${price}` : price;
+}
+
+async function handleComplexOrMultiPersonRequest({ userId, text, session, config, local }) {
+  const mentionedArtists = findMentionedArtists(text, config.artists);
+  const multiPeople = isMultiPersonBookingText(text);
+  const multipleArtistsTyped = mentionedArtists.length >= 2;
+  const asksMultiAvailability = /(哪個時段|哪些時段|什麼時段|有沒有|可以預約|可約|查|看).*(2位|兩位|二位|多人|多位).*(美甲師|設計師)/.test(text);
+  const specificMultiBooking = multiPeople
+    && Boolean(local.booking.date || local.booking.time || local.booking.period)
+    && /(預約|可約|可以約|可以預約|想約|我要約|安排)/.test(text);
+
+  if (asksMultiAvailability && local.booking.date && !specificMultiBooking) {
+    const grouped = groupAvailableArtistsByTime(config.slots, local.booking.date, config.settings)
+      .filter((item) => item.artists.length >= 2)
+      .slice(0, 8);
+    if (!grouped.length) {
+      return `${local.booking.date} 目前查不到同時有 2 位以上美甲師可預約的時段。若是多人同行，我可以幫您通知店家確認。`;
+    }
+    return [
+      `${local.booking.date} 同時有 2 位以上美甲師可預約的時段：`,
+      ...grouped.map((item, index) => `${index + 1}. ${item.time}｜${item.artists.join('、')}`),
+      '多人同行需要店家確認，請告訴我人數、服務項目與希望時間。',
+    ].join('\n');
+  }
+
+  if (!multiPeople && !multipleArtistsTyped) return '';
+
+  sessions.delete(userId);
+  const requested = [
+    local.booking.date ? `日期：${local.booking.date}` : '',
+    local.booking.time ? `時間：${local.booking.time}` : local.booking.period ? `時段：${periodLabel(local.booking.period)}` : '',
+    local.booking.service ? `服務：${local.booking.service}` : '',
+    mentionedArtists.length ? `美甲師：${mentionedArtists.join('、')}` : '',
+  ].filter(Boolean).join('\n');
+
+  notifyShop([
+    '需要店家確認的預約需求',
+    `客人來源：${userId}`,
+    `訊息：${text}`,
+    requested,
+  ].filter(Boolean).join('\n')).catch((error) => {
+    console.error('notifyShop failed:', error.response?.data || error.message);
+  });
+
+  return [
+    '多人同行或同時指定多位美甲師，需要店家確認後才能安排。',
+    '我已先幫您通知店家，店家確認後會回覆您。',
+  ].join('\n');
+}
+
+function isMultiPersonBookingText(text) {
+  return /(2位|兩位|二位|多人|多位|兩個人|二個人|雙人|我和朋友|跟朋友|朋友一起|一起做|同時做|同時預約)/.test(text);
+}
+
+function findMentionedArtists(text, artists = []) {
+  const normalized = String(text || '').toLowerCase().replace(/\s+/g, '');
+  return artists
+    .map((artist) => artist.name)
+    .filter(Boolean)
+    .filter((name) => normalized.includes(String(name).toLowerCase().replace(/\s+/g, '')));
 }
 
 function answerArtistStatusQuery(text, config, local) {
@@ -975,6 +1121,7 @@ async function handleRescheduleFlow({ userId, text, ai, local, session, config }
   const target = bookingId ? bookings.find((booking) => bookingIdMatches(booking.id, bookingId)) : null;
   if (!target && !session.rescheduleBooking) {
     session.step = 'reschedule_select';
+    session.rescheduleOptions = bookings;
     return [
       '您是想更改已預約的時間嗎？我先幫您查詢目前的預約。',
       '',
@@ -1305,17 +1452,82 @@ function isActiveBookingSession(session) {
   return Boolean(session?.booking?.service || session?.booking?.artist || session?.booking?.date || session?.booking?.time || session?.step?.startsWith('ask_') || session?.step === 'confirm_booking');
 }
 
+function isRestartOptionNumber(text, session) {
+  if (String(text || '').trim() !== '0') return false;
+  return isActiveBookingSession(session) || session.step?.startsWith('cancel') || session.step?.startsWith('reschedule');
+}
+
+function answerAiConfirmation(ai, session, local) {
+  if (!ai) return '';
+  const localHasUsefulBookingData = Boolean(
+    local?.booking?.service
+    || local?.booking?.artist
+    || local?.booking?.date
+    || local?.booking?.time
+    || local?.booking?.period
+  );
+  if (localHasUsefulBookingData || session.step?.startsWith('ask_') || session.step === 'confirm_booking') return '';
+  if (ai.needsConfirmation && ai.confirmationQuestion) return ai.confirmationQuestion;
+  const confidence = Number(ai.confidence || 0);
+  if (confidence > 0 && confidence < 0.55 && !['booking', 'cancel', 'reschedule'].includes(ai.intent)) {
+    return '我想確認一下，您是想預約，還是調整已有預約呢？';
+  }
+  return '';
+}
+
 function shouldSkipAi(text, session, local) {
   if (/^\d+$/.test(text.trim())) return true;
   if (session.step === 'ask_contact' && /09\d{8}/.test(text)) return true;
   if (isConfirmBookingText(text) || isConfirmCancelText(text) || isConfirmRescheduleText(text)) return true;
-  if (isRescheduleText(text) || isCancelBookingRequestText(text) || isAbandonBookingText(text) || isResetText(text)) return true;
-  if (isActiveBookingSession(session) && (local.booking.date || local.booking.time || local.booking.period)) return true;
+  if (isCancelBookingRequestText(text) || isAbandonBookingText(text) || isResetText(text)) return true;
+  if (isSlotRefinementText(text, session)) return true;
   return false;
+}
+
+function isStepOptionNumber(text, session) {
+  if (!/^\d+$/.test(String(text || '').trim())) return false;
+  if (String(text || '').trim() === '0') return false;
+  return ['ask_service', 'ask_service_detail', 'ask_artist', 'ask_time', 'reschedule_change'].includes(session.step);
+}
+
+async function handleOptionNumberSelection({ userId, profile, text, session, config }) {
+  const beforeStep = session.step;
+  applyQuickReplyNumber(text, session, config);
+
+  if (beforeStep === 'ask_service' && session.step === 'ask_service_detail' && !session.booking.service) {
+    return buildServiceDetailOptions(session.pendingServiceGroup);
+  }
+
+  if (beforeStep === 'cancel_select' && session.cancelBooking) {
+    const target = session.cancelBooking;
+    return [
+      '請確認是否取消這筆預約：',
+      `預約編號：${shortBookingId(target.id)}號`,
+      `服務：${target.service}`,
+      `美甲師：${target.artist}`,
+      `時間：${target.date} ${target.start}`,
+      '確認取消請回覆「確認取消」。',
+    ].join('\n');
+  }
+
+  if (beforeStep === 'reschedule_select' && session.rescheduleBooking) {
+    const booking = session.rescheduleBooking;
+    return [
+      `我找到預約編號 ${shortBookingId(booking.id)}號：${booking.date} ${booking.start}｜${booking.artist}｜${booking.service}`,
+      '請告訴我想改成什麼時間或內容，例如「改到 5/20 下午 4 點」。',
+    ].join('\n');
+  }
+
+  if (beforeStep === 'reschedule_change') {
+    return runConversation({ userId, profile, text, ai: emptyAi(), session, config, local: { booking: {} } });
+  }
+
+  return runConversation({ userId, profile, text: '', ai: emptyAi(), session, config, local: { booking: {} } });
 }
 
 function applyQuickReplyNumber(text, session, config) {
   if (!/^\d+$/.test(text.trim())) return;
+  if (text.trim() === '0') return;
   const index = Number(text.trim()) - 1;
   if (session.step === 'ask_service') {
     const group = buildServiceGroups(config.services)[index];
@@ -1349,10 +1561,24 @@ function applyQuickReplyNumber(text, session, config) {
       session.booking.time = slots[index].time;
     }
   }
+  if (session.step === 'cancel_select' && Array.isArray(session.cancelOptions)) {
+    const target = session.cancelOptions[index];
+    if (target) {
+      session.cancelBooking = target;
+      session.step = 'cancel_confirm';
+    }
+  }
+  if (session.step === 'reschedule_select' && Array.isArray(session.rescheduleOptions)) {
+    const target = session.rescheduleOptions[index];
+    if (target) {
+      session.rescheduleBooking = target;
+      session.step = 'reschedule_change';
+    }
+  }
 }
 
 function getSession(userId, config) {
-  const ttl = Number(config?.settings?.session_ttl_minutes || process.env.SESSION_TTL_MINUTES || 120) * 60 * 1000;
+  const ttl = Number(config?.settings?.session_ttl_minutes || process.env.SESSION_TTL_MINUTES || 10) * 60 * 1000;
   const existing = sessions.get(userId);
   if (existing && Date.now() - existing.updatedAt < ttl) {
     existing.updatedAt = Date.now();
