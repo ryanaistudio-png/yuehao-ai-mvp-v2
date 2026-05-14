@@ -78,7 +78,7 @@ async function handleEvent(event) {
       await safeReplyText(event, userId, buildServiceOptions(config));
       return;
     }
-    if (isRescheduleText(text)) {
+    if (isRescheduleText(text) && !isSlotRefinementText(text, session)) {
       const profile = await getLineProfile(userId);
       const answer = await handleRescheduleFlow({ userId, text, ai: emptyAi(), local: extractLocalBookingData(text, config), session, config });
       await safeReplyText(event, userId, answer || '我沒有收到完整訊息，請再說一次。');
@@ -115,10 +115,21 @@ async function runConversation({ userId, profile, text, ai, session, config }) {
   const local = extractLocalBookingData(text, config);
   adjustAmbiguousTimeWithContext(local.booking, text, session.booking, config.settings);
   adjustAmbiguousTimeWithContext(ai.booking, text, session.booking, config.settings);
+  const businessDateAnswer = answerBusinessDateQuery(text, config);
+  if (businessDateAnswer) return businessDateAnswer;
   const availabilityAnswer = answerAvailabilityQuery(text, config);
   if (availabilityAnswer) return availabilityAnswer;
 
-  if (session.step?.startsWith('reschedule') || ai.intent === 'reschedule' || isRescheduleText(text)) {
+  if (isSlotRefinementText(text, session)) {
+    applySlotRefinementText(text, session);
+    const service = findService(config.services, session.booking.service);
+    if (service && session.booking.artist) {
+      session.step = 'ask_time';
+      return buildAvailableSlots(config, session.booking.artist, service, session.booking);
+    }
+  }
+
+  if (session.step?.startsWith('reschedule') || ai.intent === 'reschedule' || (isRescheduleText(text) && !isSlotRefinementText(text, session))) {
     return handleRescheduleFlow({ userId, text, ai, local, session, config });
   }
 
@@ -186,19 +197,19 @@ async function runConversation({ userId, profile, text, ai, session, config }) {
   }
 
   if (!isBookingFarEnough(session.booking, config.settings)) {
-    session.booking.date = '';
+    const requested = formatFriendlyDateTime(session.booking.date, session.booking.time);
     session.booking.time = '';
     session.step = 'ask_time';
     const hours = Number(config.settings.min_hours_before_booking || 0);
-    return `這個時間太近了，店家最少需要提前 ${hours} 小時預約。\n\n${buildAvailableSlots(config, session.booking.artist, service, session.booking)}`;
+    return `${requested} 太近了，店家最少需要提前 ${hours} 小時預約。\n\n${buildAvailableSlots(config, session.booking.artist, service, session.booking)}`;
   }
 
   const slots = findConsecutiveSlots(config.slots, session.booking, service, config.settings);
   if (!slots.length) {
-    session.booking.date = '';
+    const requested = formatFriendlyDateTime(session.booking.date, session.booking.time);
     session.booking.time = '';
     session.step = 'ask_time';
-    return `這個時間沒有足夠完成「${service.name}」的連續空檔。\n\n${buildAvailableSlots(config, session.booking.artist, service, session.booking)}`;
+    return `${requested} 沒有足夠完成「${service.name}」的連續空檔。\n\n${buildAvailableSlots(config, session.booking.artist, service, session.booking)}`;
   }
 
   if (!session.booking.customerName || !session.booking.phone) {
@@ -229,12 +240,12 @@ async function runConversation({ userId, profile, text, ai, session, config }) {
       `時間：${session.booking.date} ${session.booking.time}`,
       `姓名：${session.booking.customerName}`,
       `電話：${session.booking.phone}`,
-      '確認無誤請回覆「確認預約」。',
+      '確認無誤請回覆「888」。',
     ].join('\n');
   }
 
   if (!isConfirmBookingText(text)) {
-    return '如果資訊正確，請回覆「確認預約」。如果要重來，請回覆「重來」。';
+    return '如果資訊正確，請回覆「888」。如果要重來，請回覆「重來」。';
   }
 
   let booking;
@@ -269,7 +280,6 @@ async function runConversation({ userId, profile, text, ai, session, config }) {
     `美甲師：${booking.artist}`,
     `時間：${booking.date} ${booking.time}`,
     config.settings.shop_address ? `地址：${config.settings.shop_address}` : '',
-    '請保留此編號，之後取消或更改預約會用到。',
   ].filter(Boolean).join('\n');
 }
 
@@ -622,6 +632,25 @@ function buildAvailableSlots(config, artist, service, booking = {}) {
   ].join('\n');
 }
 
+function isSlotRefinementText(text, session) {
+  if (session.step !== 'ask_time') return false;
+  if (!session.booking?.service || !session.booking?.artist) return false;
+  return /(晚一點|晚點|晚些|更晚|晚上的?|下午|午後|早一點|早點|早些|更早|上午|早上|中午)/.test(text);
+}
+
+function applySlotRefinementText(text, session) {
+  if (!session.booking) return;
+  const period = parsePeriodText(text) || (
+    /(晚一點|晚點|晚些|更晚|晚上的?)/.test(text)
+      ? 'evening'
+      : /(早一點|早點|早些|更早|上午|早上)/.test(text)
+        ? 'morning'
+        : ''
+  );
+  if (period) session.booking.period = period;
+  session.booking.time = '';
+}
+
 function findAvailableStartSlots(slots, booking, service, settings, ignoreBookingId = '') {
   const starts = slots.filter((slot) => {
     if (booking.artist && slot.artist !== booking.artist) return false;
@@ -685,13 +714,49 @@ function answerFaq(text, config) {
   return faqMap.find((item) => item.value && item.keys.some((key) => text.includes(key)))?.value || '';
 }
 
+function answerBusinessDateQuery(text, config) {
+  if (!/(營業|有開|開店|店休|休息|公休)/.test(text)) return '';
+  const date = parseDateText(text);
+  if (!date) return '';
+
+  const daySlots = (config.slots || [])
+    .filter((slot) => slot.date === date)
+    .sort(compareSlots);
+  if (!daySlots.length) {
+    return `${date} 目前查不到營業時段，可能是店休、班表尚未建立，或超過目前可查範圍。`;
+  }
+
+  const times = [...new Set(daySlots.map((slot) => slot.time).filter(Boolean))].sort();
+  const openTime = times[0] || config.settings.day_start_time || '';
+  const lastStart = times[times.length - 1] || config.settings.day_end_time || '';
+  const closeTime = lastStart ? minutesToTime(timeToMinutes(lastStart) + Number(config.settings.slot_minutes || 30)) : config.settings.day_end_time || '';
+  return [
+    `${formatDateWithWeekday(date)} 有營業。`,
+    openTime && closeTime ? `目前表上的營業時段約 ${openTime}-${closeTime}。` : '',
+    '如果您想預約，我可以幫您查可約時段。',
+  ].filter(Boolean).join('\n');
+}
+
 function answerAvailabilityQuery(text, config) {
+  const local = extractLocalBookingData(text, config);
+  const asksDateSlots = /(查|看|有沒有|有|可約|可以約|空檔|時間)/.test(text)
+    && Boolean(local.booking.date)
+    && !local.booking.service
+    && !local.booking.time;
+  if (asksDateSlots) {
+    return [
+      `可以，我先幫您看 ${local.booking.date}。`,
+      '請先選服務項目，我才能依服務時間確認可約空檔。',
+      '',
+      buildServiceOptions(config),
+    ].join('\n');
+  }
+
   const mentionsKnownArtist = (config.artists || []).some((artist) => text.includes(artist.name));
   const asksAvailability = /(美甲師|設計師).*(可預約|可以約|有空|在嗎)|今天.*(誰|哪位|哪個).*可/.test(text)
     || (mentionsKnownArtist && /(可預約|可以約|有空|在嗎)/.test(text))
     || (/今天.*(在嗎|有空|可預約|可以約)/.test(text));
   if (!asksAvailability) return '';
-  const local = extractLocalBookingData(text, config);
   const date = local.booking.date || nowInZone().format('YYYY-MM-DD');
   const artistName = local.booking.artist || findMentionedArtistName(text, config.artists);
 
@@ -921,20 +986,36 @@ function resolveMonthDay(month, day) {
 }
 
 function parseTimeText(text) {
-  const half = text.match(/(\d{1,2})\s*點半/);
-  if (half) return normalizeHourMinute(Number(half[1]), 30, text);
+  const half = text.match(/([零〇一二兩三四五六七八九十\d]{1,3})\s*點\s*半/);
+  if (half) return normalizeHourMinute(parseChineseHour(half[1]), 30, text);
   const colon = text.match(/(\d{1,2})[:：](\d{2})/);
   if (colon) return normalizeHourMinute(Number(colon[1]), Number(colon[2]), text);
-  const compact = text.match(/(?:^|[^\d])(\d{3,4})(?:$|[^\d])/);
-  if (compact && !/[/-]/.test(text)) {
+  const compact = text.match(/(?:^|[^\d/-])(\d{3,4})(?:$|[^\d/-])/);
+  if (compact) {
     const raw = compact[1].padStart(4, '0');
     const hour = Number(raw.slice(0, 2));
     const minute = Number(raw.slice(2, 4));
     if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) return normalizeHourMinute(hour, minute, text);
   }
-  const hour = text.match(/(\d{1,2})\s*點/);
-  if (hour) return normalizeHourMinute(Number(hour[1]), 0, text);
+  const hourMinute = text.match(/([零〇一二兩三四五六七八九十\d]{1,3})\s*點\s*([零〇一二兩三四五六七八九十\d]{1,2})?\s*分?/);
+  if (hourMinute) {
+    return normalizeHourMinute(parseChineseHour(hourMinute[1]), hourMinute[2] ? parseChineseHour(hourMinute[2]) : 0, text);
+  }
   return '';
+}
+
+function parseChineseHour(value) {
+  const text = String(value || '').trim();
+  if (/^\d+$/.test(text)) return Number(text);
+  const normalized = text.replace(/兩/g, '二').replace(/〇/g, '零');
+  const map = { 零: 0, 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  if (normalized === '十') return 10;
+  if (normalized.startsWith('十')) return 10 + (map[normalized[1]] || 0);
+  if (normalized.includes('十')) {
+    const [tens, ones] = normalized.split('十');
+    return (map[tens] || 1) * 10 + (map[ones] || 0);
+  }
+  return map[normalized] || 0;
 }
 
 function normalizeHourMinute(hour, minute, text) {
@@ -992,6 +1073,13 @@ function periodLabel(period) {
   if (period === 'afternoon') return '下午';
   if (period === 'evening') return '晚上';
   return '';
+}
+
+function formatDateWithWeekday(date) {
+  const target = dayjs.tz(`${date} 00:00`, timezone);
+  if (!target.isValid()) return date;
+  const weekdays = ['週日', '週一', '週二', '週三', '週四', '週五', '週六'];
+  return `${target.format('M/D')}（${weekdays[target.day()]}）`;
 }
 
 function formatFriendlyDateTime(date, time) {
@@ -1240,7 +1328,7 @@ function isAbandonBookingText(text) {
 }
 
 function isConfirmBookingText(text) {
-  return ['確認', '確認預約', '對', '沒錯', '可以'].includes(text.trim());
+  return ['888', '確認', '確認預約', '對', '沒錯', '可以'].includes(text.trim());
 }
 
 function isConfirmCancelText(text) {
