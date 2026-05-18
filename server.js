@@ -87,7 +87,7 @@ async function handleEvent(event) {
     }
 
     if (isGreetingText(text)) {
-      await replyWithMemory(event, userId, session, '您好，我可以協助預約、調整已有預約或查詢可約時段。若要預約，請直接回覆「預約」。');
+      await replyWithMemory(event, userId, session, buildRestartMessage());
       return;
     }
     if (isStartBookingText(text)) {
@@ -771,6 +771,9 @@ function buildRestartMessage() {
   return [
     '好的，已重新開始。',
     '請問您想預約，還是需要調整已有預約呢？',
+    '1. 📅 我要預約',
+    '2. ✏️ 修改預約',
+    '3. ❌ 取消預約',
   ].join('\n');
 }
 
@@ -822,6 +825,7 @@ function getBookableArtists(config, service) {
 
 function buildDateOptions(config, artist, service, booking = {}) {
   const dates = getAvailableDateOptions(config, artist, service, booking).slice(0, 10);
+  logSlotDebug('date_options', config, artist, service, booking, dates);
   if (!dates.length) return buildNoAvailableSlotsMessage(config, artist, service, booking);
   return [
     `${artist} 做「${service.name}」約 ${service.duration} 分鐘，想預約哪一天？`,
@@ -851,6 +855,24 @@ function getAvailablePeriodOptions(config, artist, service, booking = {}) {
   const slots = findAvailableStartSlots(config.slots, { ...booking, artist, period: '' }, service, config.settings);
   const periods = ['morning', 'afternoon', 'evening'];
   return periods.filter((period) => slots.some((slot) => isInPeriod(slot.time, period)));
+}
+
+function logSlotDebug(stage, config, artist, service, booking = {}, options = []) {
+  const artistSlots = (config.slots || []).filter((slot) => !artist || slot.artist === artist);
+  const openSlots = artistSlots.filter((slot) => isSlotOpenForBooking(slot));
+  const starts = service ? findAvailableStartSlots(config.slots || [], { ...booking, artist }, service, config.settings || {}) : [];
+  console.log(`SLOT_DEBUG ${JSON.stringify({
+    stage,
+    artist,
+    service: service?.name || '',
+    date: booking.date || '',
+    period: booking.period || '',
+    totalArtistSlots: artistSlots.length,
+    openArtistSlots: openSlots.length,
+    consecutiveStarts: starts.length,
+    firstStarts: starts.slice(0, 5).map((slot) => `${slot.date} ${slot.time}`),
+    options: options.slice(0, 5),
+  })}`);
 }
 
 function restartOptionLine() {
@@ -1673,6 +1695,7 @@ function applyQuickReplyNumber(text, session, config) {
   if (text.trim() === '0') return;
   const index = Number(text.trim()) - 1;
   if (session.step === 'ask_service') {
+    if (['2', '3'].includes(text.trim())) return;
     const service = (config.services || []).slice(0, 12)[index];
     if (service) session.booking.service = service.name;
     session.pendingServiceGroup = null;
@@ -1950,11 +1973,26 @@ function buildQuickReplyFromText(text) {
       type: 'action',
       action: {
         type: 'message',
-        label: truncateQuickReplyLabel(match[2]),
+        label: truncateQuickReplyLabel(addQuickReplyEmoji(match[2])),
         text: match[1],
       },
     }));
   return items.length ? { items } : null;
+}
+
+function addQuickReplyEmoji(label) {
+  const text = String(label || '').trim();
+  if (/^[\p{Emoji_Presentation}\p{Extended_Pictographic}]/u.test(text)) return text;
+  if (text.includes('預約')) return `📅 ${text}`;
+  if (text.includes('修改')) return `✏️ ${text}`;
+  if (text.includes('取消')) return `❌ ${text}`;
+  if (text.includes('重新開始')) return `🏠 ${text}`;
+  if (/上午|早上/.test(text)) return `🌤️ ${text}`;
+  if (/下午/.test(text)) return `☀️ ${text}`;
+  if (/晚上/.test(text)) return `🌙 ${text}`;
+  if (/^\d{4}-\d{2}-\d{2}|^\d{1,2}\/\d{1,2}|週|星期|明天|今天/.test(text)) return `📆 ${text}`;
+  if (/\d{1,2}:\d{2}/.test(text)) return `🕒 ${text}`;
+  return `💅 ${text}`;
 }
 
 function truncateQuickReplyLabel(label) {
