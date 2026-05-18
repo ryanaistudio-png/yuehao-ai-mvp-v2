@@ -659,7 +659,8 @@ function createApiBooking_(ss, booking) {
     booking.artist, service.name, new Date(booking.date), minutesToTime_(start), minutesToTime_(end),
     service.duration, booking.note || '', '', '未收款', '', now, '',
   ]);
-  refreshSystemData(false);
+  markBookedSlots_(ss, booking.artist, booking.date, start, end, id);
+  SpreadsheetApp.flush();
   return {
     bookingId: id,
     customerName: booking.customerName,
@@ -671,6 +672,26 @@ function createApiBooking_(ss, booking) {
     end: minutesToTime_(end),
     duration: service.duration,
   };
+}
+
+function markBookedSlots_(ss, artist, dateValue, start, end, bookingId) {
+  const sheet = ss.getSheetByName(SHEETS.slots);
+  if (!sheet || sheet.getLastRow() < 2) return;
+  const dateText = formatDate_(dateValue);
+  const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, 7).getValues();
+  const updates = [];
+  values.forEach((row, index) => {
+    const rowDate = formatMaybeDate_(row[0]);
+    const rowTime = normalizeTimeText_(row[1]);
+    const rowArtist = String(row[2] || '').trim();
+    const minutes = timeToMinutes_(rowTime);
+    if (rowDate === dateText && rowArtist === artist && minutes >= start && minutes < end) {
+      updates.push(index + 2);
+    }
+  });
+  updates.forEach((rowNumber) => {
+    sheet.getRange(rowNumber, 4, 1, 4).setValues([['已預約', bookingId, '', new Date()]]);
+  });
 }
 
 function getApiUserActiveBookings_(ss, userId) {
