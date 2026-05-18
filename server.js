@@ -256,6 +256,19 @@ async function runConversation({ userId, profile, text, ai, session, config, loc
   if (!session.booking.date || !session.booking.time) {
     session.step = 'ask_time';
     const alternatives = findAlternativeArtistSlots(config, session.booking, service);
+    const currentArtistSlots = session.booking.artist
+      ? findAvailableStartSlots(config.slots, session.booking, service, config.settings)
+      : [];
+    if (session.booking.artist && !session.booking.date && !currentArtistSlots.length) {
+      const unavailableArtist = session.booking.artist;
+      session.booking.artist = '';
+      session.step = 'ask_artist';
+      return [
+        `${unavailableArtist} 目前沒有足夠完成「${service.name}」的連續空檔，請換其他美甲師或服務。`,
+        '',
+        buildArtistOptions(config, service),
+      ].join('\n');
+    }
     if (session.booking.artist && session.booking.date && !findAvailableStartSlots(config.slots, session.booking, service, config.settings).length && alternatives.length) {
       const unavailableArtist = session.booking.artist;
       session.booking.artist = '';
