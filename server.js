@@ -1319,6 +1319,8 @@ function answerAvailabilityQuery(text, config, session, local) {
       `目前沒有找到「${artistName}」這位美甲師。`,
       `目前可接單的美甲師有：${config.artists.map((artist) => artist.name).join('、')}。`,
       '請問想預約哪一項服務？我會依服務時間幫您確認完整時段。',
+      '',
+      buildServiceOptions(config),
     ].join('\n');
   }
 
@@ -1336,6 +1338,8 @@ function answerAvailabilityQuery(text, config, session, local) {
     `${date} 可預約狀況：`,
     ...lines,
     '請問想做哪一項服務？我會依服務時間幫您確認完整時段。',
+    '',
+    buildServiceOptions(config),
   ].join('\n');
 }
 

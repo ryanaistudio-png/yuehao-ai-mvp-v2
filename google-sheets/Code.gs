@@ -861,12 +861,14 @@ function buildWeekView_(ss) {
   sheet.getRange('A3:H500').clearContent().clearFormat().clearDataValidations();
   let row = 3;
   const statusRanges = [];
-  artists.forEach((artist) => {
+  sheet.getRange(row, 1, 1, 8).setValues([['時間', ...days.map((date) => `${getWeekday_(date)}\n${formatDate_(date)}`)]]);
+  styleHeader_(sheet.getRange(row, 1, 1, 8));
+  sheet.setFrozenRows(3);
+  row += 1;
+
+  artists.forEach((artist, artistIndex) => {
     sheet.getRange(row, 1, 1, 8).setValues([[`${artist.name} 一週預約`, '', '', '', '', '', '', '']]);
-    styleBand_(sheet.getRange(row, 1, 1, 8));
-    row += 1;
-    sheet.getRange(row, 1, 1, 8).setValues([['時間', ...days.map((date) => `${getWeekday_(date)}\n${formatDate_(date)}`)]]);
-    styleHeader_(sheet.getRange(row, 1, 1, 8));
+    styleBand_(sheet.getRange(row, 1, 1, 8), artistBandColor_(artistIndex));
     row += 1;
 
     const rows = [];
@@ -878,7 +880,7 @@ function buildWeekView_(ss) {
         if (booking) {
           line.push(minutes === booking.startMinutes
             ? `${shortBookingId_(booking.id)}號｜${booking.status}｜${booking.startTime}-${booking.endTime}\n${booking.service}｜${booking.customer}`
-            : booking.customer);
+            : `${booking.status}\n${booking.customer}`);
         } else if (isWorkingSlot_(fixed, specials, artist.name, date, minutes, slotMinutes)) {
           line.push('可約');
         } else {
@@ -1374,8 +1376,13 @@ function styleHeader_(range) {
   range.setBackground('#111827').setFontColor('#ffffff').setFontWeight('bold').setWrap(true);
 }
 
-function styleBand_(range) {
-  range.merge().setBackground('#dbeafe').setFontWeight('bold');
+function styleBand_(range, color) {
+  range.merge().setBackground(color || '#dbeafe').setFontWeight('bold');
+}
+
+function artistBandColor_(index) {
+  const colors = ['#dbeafe', '#dcfce7', '#fef3c7', '#fce7f3', '#ede9fe', '#ccfbf1'];
+  return colors[index % colors.length];
 }
 
 function styleWeekStatus_(sheet, startRow, numRows, statusRanges) {
