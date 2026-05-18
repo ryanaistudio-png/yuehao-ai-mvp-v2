@@ -7,6 +7,7 @@
 - 客人用 LINE 自然語言預約
 - 客人可從 LINE 取消自己的預約
 - 店家用 Google Sheet 看本週、下週、下下週預約
+- 店家可用 LINE 指令查今日預約、查預約、修改預約、取消預約
 - 店家可用 `02 現場新增` 建立現場客預約
 - 店家可用 `03 修改預約` 載入預約後修改、延長或取消
 - 預約編號改為月份流水號，例如系統內部 `202605-001`，LINE 顯示 `001號`
@@ -53,9 +54,12 @@ APPS_SCRIPT_WEB_APP_URL=你的 Apps Script Web App /exec 網址
 APPS_SCRIPT_API_TOKEN=必須等於 Google Sheet 90 系統設定的 api_token
 LINE_CHANNEL_ACCESS_TOKEN=你的 LINE token
 LINE_CHANNEL_SECRET=你的 LINE secret
+SHOP_STAFF_LINE_IDS=可使用店家指令的 LINE userId，多人用逗號分隔
 ```
 
 注意：API key 不要貼到 GitHub，也不要截圖公開。
+
+若沒有設定 `SHOP_STAFF_LINE_IDS` 或 `SHOP_NOTIFY_LINE_ID`，店家指令會先以 MVP 開放模式運作；正式店家請至少設定其中一個，避免客人誤用管理指令。
 
 ### AI 判斷紀錄
 

@@ -86,6 +86,10 @@ function doPost(e) {
     if (payload.action === 'getCustomerProfile') return jsonResponse_({ ok: true, data: getApiCustomerProfile_(ss, payload.userId || '') });
     if (payload.action === 'updateBooking') return jsonResponse_({ ok: true, data: updateApiBooking_(ss, payload.userId || '', payload.booking || {}) });
     if (payload.action === 'cancelBooking') return jsonResponse_({ ok: true, data: cancelApiBooking_(ss, payload.userId || '', payload.bookingId || '') });
+    if (payload.action === 'getStoreTodayBookings') return jsonResponse_({ ok: true, data: getStoreTodayBookings_(ss) });
+    if (payload.action === 'getStoreBooking') return jsonResponse_({ ok: true, data: getStoreBooking_(ss, payload.bookingId || '') });
+    if (payload.action === 'storeUpdateBooking') return jsonResponse_({ ok: true, data: storeUpdateBooking_(ss, payload.booking || {}) });
+    if (payload.action === 'storeCancelBooking') return jsonResponse_({ ok: true, data: storeCancelBooking_(ss, payload.bookingId || '') });
 
     return jsonResponse_({ ok: false, error: 'Unknown action' });
   } catch (error) {
@@ -732,6 +736,36 @@ function getApiCustomerProfile_(ss, userId) {
   };
 }
 
+function getStoreTodayBookings_(ss) {
+  const today = formatDate_(new Date());
+  return readBookings_(ss)
+    .filter((booking) => booking.date === today && !['已取消', '已完成'].includes(booking.status))
+    .sort((a, b) => a.startMinutes - b.startMinutes || String(a.artist).localeCompare(String(b.artist)))
+    .map(formatApiBooking_);
+}
+
+function getStoreBooking_(ss, bookingId) {
+  const found = resolveBookingRow_(ss, bookingId);
+  return formatApiBooking_(parseBookingRow_(found.values));
+}
+
+function formatApiBooking_(booking) {
+  return {
+    id: booking.id,
+    status: booking.status,
+    customer: booking.customer,
+    phone: booking.phone,
+    artist: booking.artist,
+    service: booking.service,
+    date: booking.date,
+    start: booking.startTime,
+    end: booking.endTime,
+    duration: booking.duration,
+    lineUserId: booking.lineUserId,
+    lineDisplayName: booking.lineDisplayName,
+  };
+}
+
 function updateApiBooking_(ss, userId, booking) {
   if (!booking.bookingId) throw new Error('缺少預約編號');
   if (!booking.artist || !booking.service || !booking.date || !booking.time) throw new Error('修改資料不足');
@@ -770,8 +804,58 @@ function updateApiBooking_(ss, userId, booking) {
   };
 }
 
+function storeUpdateBooking_(ss, booking) {
+  if (!booking.bookingId) throw new Error('缺少預約編號');
+  if (!booking.artist || !booking.service || !booking.date || !booking.time) throw new Error('修改資料不足');
+  const found = resolveBookingRow_(ss, booking.bookingId);
+  const old = parseBookingRow_(found.values);
+  if (['已取消', '已完成'].includes(old.status)) throw new Error('這筆預約目前不可修改');
+  const service = findService_(ss, booking.service, true);
+  const artist = readArtists_(ss).find((item) => item.name === booking.artist && item.status === '可接單');
+  if (!artist) throw new Error('這位美甲師目前不可接單');
+  const start = timeToMinutes_(booking.time);
+  const end = start + service.duration;
+  assertApiBookingFutureEnough_(ss, booking.date, start);
+  assertNoConflict_(ss, old.id, booking.artist, booking.date, start, end);
+  const warnings = getExceptionWarnings_(ss, booking.artist, booking.date, start, end);
+  assertSpecialAllowed_(warnings, '否');
+  const newId = bookingMonthPrefix_(old.id) === bookingMonthPrefix_(nextBookingId_(ss, booking.date))
+    ? old.id
+    : nextBookingId_(ss, booking.date);
+  const sheet = ss.getSheetByName(SHEETS.bookings);
+  sheet.getRange(found.rowNumber, 1, 1, 20).setValues([[
+    newId, '已確認', old.source, old.createdAt, old.customer, old.phone, old.lineUserId, old.lineDisplayName,
+    booking.artist, service.name, new Date(booking.date), minutesToTime_(start), minutesToTime_(end),
+    service.duration, buildNote_(old.note, warnings), '', old.paymentStatus, old.paidAmount, new Date(), '',
+  ]]);
+  refreshSystemData(false);
+  return {
+    bookingId: newId,
+    customerName: old.customer,
+    phone: old.phone,
+    service: service.name,
+    artist: booking.artist,
+    date: booking.date,
+    time: minutesToTime_(start),
+    end: minutesToTime_(end),
+    duration: service.duration,
+  };
+}
+
 function cancelApiBooking_(ss, userId, bookingId) {
   const found = resolveBookingRow_(ss, bookingId, userId);
+  const booking = parseBookingRow_(found.values);
+  if (booking.status === '已取消') return { bookingId: booking.id, status: '已取消' };
+  const sheet = ss.getSheetByName(SHEETS.bookings);
+  sheet.getRange(found.rowNumber, 2).setValue('已取消');
+  sheet.getRange(found.rowNumber, 19).setValue(new Date());
+  sheet.getRange(found.rowNumber, 20).setValue(new Date());
+  refreshSystemData(false);
+  return { bookingId: booking.id, status: '已取消' };
+}
+
+function storeCancelBooking_(ss, bookingId) {
+  const found = resolveBookingRow_(ss, bookingId);
   const booking = parseBookingRow_(found.values);
   if (booking.status === '已取消') return { bookingId: booking.id, status: '已取消' };
   const sheet = ss.getSheetByName(SHEETS.bookings);
