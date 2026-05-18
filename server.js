@@ -842,7 +842,7 @@ function buildAvailableSlots(config, artist, service, booking = {}) {
   }
   return [
     `${isAnyArtist(artist) ? '不指定美甲師' : artist} 做「${service.name}」約 ${service.duration} 分鐘，${booking.date} ${periodLabel(booking.period)}可以預約以下時段：`,
-    ...candidates.map((slot, index) => `${index + 1}. ${slot.date} ${slot.time}｜${slot.artist}`),
+    ...candidates.map((slot, index) => `${index + 1}. ${slot.time}｜${slot.artist}`),
     restartOptionLine(),
     '請直接回覆上面的編號數字，或輸入您希望的日期與時間（例如：5/20 1600）。',
   ].join('\n');
