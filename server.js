@@ -855,14 +855,31 @@ function getBookableArtists(config, service) {
 function getAvailableArtistsForBooking(config, service, booking = {}) {
   const artists = getBookableArtists(config, service);
   if (!booking.date || !booking.period) return artists;
-  return artists.filter((artist) => (
-    findAvailableStartSlots(
+  const diagnostics = artists.map((artist) => {
+    const slots = findAvailableStartSlots(
       config.slots,
       { ...booking, artist: artist.name },
       service,
       config.settings
-    ).length
-  ));
+    );
+    return {
+      artist,
+      count: slots.length,
+      firstSlots: slots.slice(0, 5).map((slot) => `${slot.date} ${slot.time}`),
+    };
+  });
+  console.log(`ARTIST_OPTION_DEBUG ${JSON.stringify({
+    service: service?.name || '',
+    duration: service?.duration || '',
+    date: booking.date || '',
+    period: booking.period || '',
+    artists: diagnostics.map((item) => ({
+      name: item.artist.name,
+      count: item.count,
+      firstSlots: item.firstSlots,
+    })),
+  })}`);
+  return diagnostics.filter((item) => item.count).map((item) => item.artist);
 }
 
 function buildDateOptions(config, artist, service, booking = {}) {
