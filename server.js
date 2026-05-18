@@ -2429,6 +2429,7 @@ async function replyWithMemory(event, userId, session, text) {
 }
 
 async function appsScriptRequest(action, data = {}) {
+  const timeout = Number(process.env.APPS_SCRIPT_TIMEOUT_MS || 60000);
   const response = await axios.post(
     requiredEnv('APPS_SCRIPT_WEB_APP_URL'),
     {
@@ -2436,7 +2437,7 @@ async function appsScriptRequest(action, data = {}) {
       token: String(requiredEnv('APPS_SCRIPT_API_TOKEN')).trim(),
       ...data,
     },
-    { timeout: 20000 }
+    { timeout }
   );
   if (!response.data?.ok) {
     throw new Error(response.data?.error || `Apps Script action failed: ${action}`);

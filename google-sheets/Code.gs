@@ -160,6 +160,12 @@ function refreshSystemData(showUi) {
   if (showUi !== false) safeUiAlert_('已更新預約畫面。');
 }
 
+function refreshApiBookingData_(ss) {
+  rebuildAvailableSlots_(ss);
+  rebuildCustomers_(ss);
+  SpreadsheetApp.flush();
+}
+
 function syncArtistsAndRefresh() {
   const ss = getAppSpreadsheet_();
   syncFixedScheduleArtists_(ss);
@@ -790,7 +796,7 @@ function updateApiBooking_(ss, userId, booking) {
     booking.artist, service.name, new Date(booking.date), minutesToTime_(start), minutesToTime_(end),
     service.duration, buildNote_(old.note, warnings), '', old.paymentStatus, old.paidAmount, new Date(), '',
   ]]);
-  refreshSystemData(false);
+  refreshApiBookingData_(ss);
   return {
     bookingId: newId,
     customerName: old.customer,
@@ -828,7 +834,7 @@ function storeUpdateBooking_(ss, booking) {
     booking.artist, service.name, new Date(booking.date), minutesToTime_(start), minutesToTime_(end),
     service.duration, buildNote_(old.note, warnings), '', old.paymentStatus, old.paidAmount, new Date(), '',
   ]]);
-  refreshSystemData(false);
+  refreshApiBookingData_(ss);
   return {
     bookingId: newId,
     customerName: old.customer,
@@ -850,7 +856,7 @@ function cancelApiBooking_(ss, userId, bookingId) {
   sheet.getRange(found.rowNumber, 2).setValue('已取消');
   sheet.getRange(found.rowNumber, 19).setValue(new Date());
   sheet.getRange(found.rowNumber, 20).setValue(new Date());
-  refreshSystemData(false);
+  refreshApiBookingData_(ss);
   return { bookingId: booking.id, status: '已取消' };
 }
 
@@ -862,7 +868,7 @@ function storeCancelBooking_(ss, bookingId) {
   sheet.getRange(found.rowNumber, 2).setValue('已取消');
   sheet.getRange(found.rowNumber, 19).setValue(new Date());
   sheet.getRange(found.rowNumber, 20).setValue(new Date());
-  refreshSystemData(false);
+  refreshApiBookingData_(ss);
   return { bookingId: booking.id, status: '已取消' };
 }
 
