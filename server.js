@@ -55,17 +55,20 @@ async function handleEvent(event) {
   try {
     const config = await loadConfig();
     let session = getSession(userId, config);
+    rememberUserMessage(session, text);
 
     if (isResetText(text)) {
       sessions.delete(userId);
       cache.expiresAt = 0;
-      await safeReplyText(event, userId, buildRestartMessage());
+      session = getSession(userId, config);
+      await replyWithMemory(event, userId, session, buildRestartMessage());
       return;
     }
     if (isRestartOptionNumber(text, session)) {
       sessions.delete(userId);
       cache.expiresAt = 0;
-      await safeReplyText(event, userId, buildRestartMessage());
+      session = getSession(userId, config);
+      await replyWithMemory(event, userId, session, buildRestartMessage());
       return;
     }
     if (isAbandonBookingText(text) && (isActiveBookingSession(session) || session.step?.startsWith('cancel') || session.step?.startsWith('reschedule'))) {
@@ -79,36 +82,43 @@ async function handleEvent(event) {
 
     const complexAnswer = await handleComplexOrMultiPersonRequest({ userId, text, session, config, local });
     if (complexAnswer) {
-      await safeReplyText(event, userId, complexAnswer);
+      await replyWithMemory(event, userId, session, complexAnswer);
       return;
     }
 
     if (isGreetingText(text)) {
-      await safeReplyText(event, userId, '您好，我可以協助預約、調整已有預約或查詢可約時段。若要預約，請直接回覆「預約」。');
+      await replyWithMemory(event, userId, session, '您好，我可以協助預約、調整已有預約或查詢可約時段。若要預約，請直接回覆「預約」。');
       return;
     }
     if (isStartBookingText(text)) {
       sessions.delete(userId);
       session = getSession(userId, config);
       session.step = 'ask_service';
-      await safeReplyText(event, userId, buildServiceOptions(config));
+      await replyWithMemory(event, userId, session, buildServiceOptions(config));
       return;
     }
     if (isRescheduleText(text) && !isSlotRefinementText(text, session)) {
       const profile = await getLineProfile(userId);
       const answer = await handleRescheduleFlow({ userId, text, ai: emptyAi(), local: extractLocalBookingData(text, config), session, config });
-      await safeReplyText(event, userId, answer || '我沒有收到完整訊息，請再說一次。');
+      await replyWithMemory(event, userId, session, answer || '我沒有收到完整訊息，請再說一次。');
       return;
     }
     if (isCancelBookingRequestText(text)) {
       const answer = await handleCancelFlow({ userId, text, ai: emptyAi(), session, config });
-      await safeReplyText(event, userId, answer || '我沒有收到完整訊息，請再說一次。');
+      await replyWithMemory(event, userId, session, answer || '我沒有收到完整訊息，請再說一次。');
+      return;
+    }
+    const inferredOptionNumber = inferOptionNumberFromText(text, session);
+    if (inferredOptionNumber && isStepOptionNumber(String(inferredOptionNumber), session)) {
+      const profile = await getLineProfile(userId);
+      const answer = await handleOptionNumberSelection({ userId, profile, text: String(inferredOptionNumber), session, config });
+      await replyWithMemory(event, userId, session, answer || '我沒有收到完整訊息，請再說一次。');
       return;
     }
     if (isStepOptionNumber(text, session)) {
       const profile = await getLineProfile(userId);
       const answer = await handleOptionNumberSelection({ userId, profile, text, session, config });
-      await safeReplyText(event, userId, answer || '我沒有收到完整訊息，請再說一次。');
+      await replyWithMemory(event, userId, session, answer || '我沒有收到完整訊息，請再說一次。');
       return;
     }
     if (isStopText(text)) {
@@ -122,19 +132,25 @@ async function handleEvent(event) {
       ? fallbackExtract(text, config)
       : await understandMessage(text, session, config);
     adjustAmbiguousTimeWithContext(ai.booking, text, session.booking, config.settings);
+    const aiOptionNumber = inferOptionNumberFromAi(ai, session);
+    if (aiOptionNumber && isStepOptionNumber(String(aiOptionNumber), session)) {
+      const answer = await handleOptionNumberSelection({ userId, profile, text: String(aiOptionNumber), session, config });
+      await replyWithMemory(event, userId, session, answer || '我沒有收到完整訊息，請再說一次。');
+      return;
+    }
     if (ai.intent === 'multi_person') {
       const complexByAi = await handleComplexOrMultiPersonRequest({ userId, text, session, config, local });
       if (!complexByAi) {
         sessions.delete(userId);
-        notifyShop(`需要店家確認的多人預約需求\n客人來源：${userId}\n訊息：${text}`).catch((error) => {
+        notifyShop(`需要店家確認的多人預約需求\n客人來源：${userId}\n訊息：${text}`, config, 'pending').catch((error) => {
           console.error('notifyShop failed:', error.response?.data || error.message);
         });
       }
-      await safeReplyText(event, userId, complexByAi || '多人同行或同時指定多位美甲師，需要店家確認後才能安排。我已先幫您通知店家。');
+      await replyWithMemory(event, userId, session, complexByAi || '多人同行或同時指定多位美甲師，需要店家確認後才能安排。我已先幫您通知店家。');
       return;
     }
     const answer = await runConversation({ userId, profile, text, ai, session, config, local });
-    await safeReplyText(event, userId, answer || '我沒有收到完整訊息，請再說一次。');
+    await replyWithMemory(event, userId, session, answer || '我沒有收到完整訊息，請再說一次。');
   } catch (error) {
     console.error('handleEvent failed:', error);
     await safeReplyText(event, userId, '系統暫時忙碌，請稍後再試；若急著預約，請直接聯絡店家協助。');
@@ -177,7 +193,12 @@ async function runConversation({ userId, profile, text, ai, session, config, loc
 
   const isActiveBookingFlow = Boolean(session.booking?.service || session.booking?.artist || session.step?.startsWith('ask_') || session.step === 'confirm_booking');
   if (ai.intent === 'faq' && !(isActiveBookingFlow && (local.booking.date || local.booking.period || local.booking.time))) {
-    return answerFaq(text, config) || config.settings.ai_fallback_reply || '這個問題我幫您請店家確認。';
+    const faqAnswer = answerFaq(text, config);
+    if (faqAnswer) return faqAnswer;
+    notifyShop(`待回答問題\n客人來源：${userId}\n訊息：${text}`, config, 'pending').catch((error) => {
+      console.error('notifyShop failed:', error.response?.data || error.message);
+    });
+    return config.settings.ai_fallback_reply || '這個問題我幫您請店家確認。';
   }
 
   forceSearchCorrectionFromLocalText(ai, local);
@@ -319,7 +340,7 @@ async function runConversation({ userId, profile, text, ai, session, config, loc
     ].join('\n');
   }
   await lockSlots(slots, booking.bookingId);
-  notifyShop(`新預約 ${booking.bookingId}\n客人：${booking.customerName}\n電話：${booking.phone}\n服務：${booking.service}\n美甲師：${booking.artist}\n時間：${booking.date} ${booking.time}`).catch((error) => {
+  notifyShop(`新預約 ${booking.bookingId}\n客人：${booking.customerName}\n電話：${booking.phone}\n服務：${booking.service}\n美甲師：${booking.artist}\n時間：${booking.date} ${booking.time}`, config, 'new').catch((error) => {
     console.error('notifyShop failed:', error.response?.data || error.message);
   });
   sessions.delete(userId);
@@ -347,7 +368,7 @@ async function handleCancelFlow({ userId, text, ai, session, config }) {
     try {
       await cancelBooking(userId, booking.id);
       await releaseLockedSlots(booking.id);
-      notifyShop(`預約已取消 ${booking.id}\n客人：${booking.customer}\n服務：${booking.service}\n美甲師：${booking.artist}\n時間：${booking.date} ${booking.start}`).catch((error) => {
+      notifyShop(`預約已取消 ${booking.id}\n客人：${booking.customer}\n服務：${booking.service}\n美甲師：${booking.artist}\n時間：${booking.date} ${booking.start}`, config, 'cancel').catch((error) => {
         console.error('notifyShop failed:', error.response?.data || error.message);
       });
       sessions.delete(userId);
@@ -399,9 +420,11 @@ async function understandMessage(text, session, config) {
     '可用 intent: booking, cancel, reschedule, faq, price, availability, artist_status, multi_person, unknown。',
     'booking 欄位可包含 service, artist, date, time, customerName, phone, note。',
     'cancel 欄位可包含 bookingId。',
-    '另可輸出 confidence(0到1), needsConfirmation(boolean), confirmationQuestion(string), peopleCount(number), artists(array)。',
+    '另可輸出 confidence(0到1), needsConfirmation(boolean), confirmationQuestion(string), peopleCount(number), artists(array), selectedOptionNumber(number), selectedOptionLabel(string)。',
     'date 請輸出 YYYY-MM-DD；time 請輸出 HH:mm；若只有上午/下午/晚上，請放 period。若不確定就留空字串。',
     '每一則訊息都要先判斷客人真正目的，不要只照前一步流程走；AI 只負責理解，最後是否能預約由程式判斷。',
+    '如果客人訊息是在回答「上一題選項」，請輸出 selectedOptionNumber 或 selectedOptionLabel，不要另開新流程。',
+    '如果客人用文字回答上一題，例如「Amy」「Bella」「款式諮詢」「第二個」，請對照上一題選項理解。',
     '如果客人說「我要改預約時間」「可以提前嗎」「改晚一點」「改約星期三」，intent 必須是 reschedule。',
     '如果客人表達提前、延後、改晚一點、改早一點、換日期、換時間、改約某天、改預約時間，intent 必須是 reschedule。',
     '如果客人說「取消預約」「我要取消預約」「取消006」，intent 是 cancel；如果只是「算了」「不約了」「取消」可能是放棄本次流程。',
@@ -413,6 +436,9 @@ async function understandMessage(text, session, config) {
     `服務項目：${config.services.map((s) => `${s.name}(${s.duration}分鐘)`).join('、')}`,
     `美甲師：${config.artists.map((a) => a.name).join('、')}`,
     `目前對話狀態：${JSON.stringify(session.booking)}`,
+    `上一題：${session.lastBotQuestion || ''}`,
+    `上一題選項：${formatLastOptions(session)}`,
+    `最近對話：${formatSessionHistory(session)}`,
     `客人訊息：${text}`,
   ].join('\n');
 
@@ -495,6 +521,8 @@ function logAiDecision(text, ai, source = process.env.AI_PROVIDER || 'deepseek')
     time: ai.booking?.time || '',
     period: ai.booking?.period || '',
     cancelBookingId: ai.cancel?.bookingId || '',
+    selectedOptionNumber: ai.selectedOptionNumber || 0,
+    selectedOptionLabel: ai.selectedOptionLabel || '',
     confidence: ai.confidence || 0,
     needsConfirmation: Boolean(ai.needsConfirmation),
   };
@@ -523,6 +551,8 @@ function normalizeAiJson(json) {
     confirmationQuestion: json.confirmationQuestion || '',
     peopleCount: Number(json.peopleCount || 0),
     artists: Array.isArray(json.artists) ? json.artists : [],
+    selectedOptionNumber: Number(json.selectedOptionNumber || 0),
+    selectedOptionLabel: json.selectedOptionLabel || '',
     booking: {
       service: json.booking?.service || '',
       artist: json.booking?.artist || '',
@@ -547,6 +577,8 @@ function emptyAi() {
     confirmationQuestion: '',
     peopleCount: 0,
     artists: [],
+    selectedOptionNumber: 0,
+    selectedOptionLabel: '',
     booking: { service: '', artist: '', date: '', time: '', customerName: '', phone: '', note: '', period: '' },
     cancel: { bookingId: '' },
   };
@@ -562,6 +594,8 @@ function fallbackExtract(text, config = { services: [], artists: [] }) {
     confirmationQuestion: '',
     peopleCount: isMultiPersonBookingText(text) ? 2 : 0,
     artists: findMentionedArtists(text, config.artists),
+    selectedOptionNumber: 0,
+    selectedOptionLabel: '',
     booking: {
       service: local.booking.service || '',
       artist: local.booking.artist || '',
@@ -953,7 +987,7 @@ async function handleComplexOrMultiPersonRequest({ userId, text, session, config
     `客人來源：${userId}`,
     `訊息：${text}`,
     requested,
-  ].filter(Boolean).join('\n')).catch((error) => {
+  ].filter(Boolean).join('\n'), config, 'pending').catch((error) => {
     console.error('notifyShop failed:', error.response?.data || error.message);
   });
 
@@ -1127,7 +1161,7 @@ async function handleRescheduleFlow({ userId, text, ai, local, session, config }
     }
     try {
       const result = await rescheduleBooking(userId, draft);
-      notifyShop(`預約已修改 ${result.bookingId}\n客人：${result.customerName}\n服務：${result.service}\n美甲師：${result.artist}\n時間：${result.date} ${result.time}`).catch((error) => {
+      notifyShop(`預約已修改 ${result.bookingId}\n客人：${result.customerName}\n服務：${result.service}\n美甲師：${result.artist}\n時間：${result.date} ${result.time}`, config, 'reschedule').catch((error) => {
         console.error('notifyShop failed:', error.response?.data || error.message);
       });
       sessions.delete(userId);
@@ -1466,6 +1500,10 @@ function isSettingEnabled(value) {
   return ['開啟', '是', 'true', '1', 'yes', 'on'].includes(String(value || '').trim().toLowerCase());
 }
 
+function isSettingDisabled(value) {
+  return ['關閉', '否', 'false', '0', 'no', 'off'].includes(String(value || '').trim().toLowerCase());
+}
+
 function mergeBookingData(target, source) {
   Object.entries(source || {}).forEach(([key, value]) => {
     if (value) target[key] = value;
@@ -1496,8 +1534,9 @@ function answerAiConfirmation(ai, session, local) {
     || local?.booking?.time
     || local?.booking?.period
   );
-  if (localHasUsefulBookingData || session.step?.startsWith('ask_') || session.step === 'confirm_booking') return '';
+  if (localHasUsefulBookingData || session.step === 'confirm_booking') return '';
   if (ai.needsConfirmation && ai.confirmationQuestion) return ai.confirmationQuestion;
+  if (session.step?.startsWith('ask_')) return '';
   const confidence = Number(ai.confidence || 0);
   if (confidence > 0 && confidence < 0.55 && !['booking', 'cancel', 'reschedule'].includes(ai.intent)) {
     return '我想確認一下，您是想預約，還是調整已有預約呢？';
@@ -1607,11 +1646,83 @@ function applyQuickReplyNumber(text, session, config) {
   }
 }
 
+function inferOptionNumberFromAi(ai, session) {
+  if (!session?.step?.startsWith('ask_') && !['cancel_select', 'reschedule_select'].includes(session?.step)) return 0;
+  const optionNumber = Number(ai?.selectedOptionNumber || 0);
+  if (optionNumber > 0 && optionNumber <= (session.lastOptions || []).length) return optionNumber;
+  if (ai?.selectedOptionLabel) return findOptionNumberByLabel(ai.selectedOptionLabel, session);
+  return 0;
+}
+
+function inferOptionNumberFromText(text, session) {
+  if (!session?.step?.startsWith('ask_') && !['cancel_select', 'reschedule_select'].includes(session?.step)) return 0;
+  const value = String(text || '').trim();
+  if (!value || /^\d+$/.test(value)) return 0;
+
+  const labelMatch = findOptionNumberByLabel(value, session);
+  if (labelMatch) return labelMatch;
+
+  const ordinal = parseOrdinalOptionNumber(value);
+  if (ordinal && ordinal <= (session.lastOptions || []).length) return ordinal;
+
+  return 0;
+}
+
+function findOptionNumberByLabel(text, session) {
+  const options = (session.lastOptions || []).filter((option) => Number(option.number) > 0);
+  if (!options.length) return 0;
+  const normalizedText = normalizeOptionText(text);
+  const matches = options.filter((option) => {
+    return optionLabelAliases(option.label).some((alias) => {
+      const normalizedAlias = normalizeOptionText(alias);
+      return normalizedAlias.length >= 2 && (normalizedText === normalizedAlias || normalizedText.includes(normalizedAlias));
+    });
+  });
+  return matches.length === 1 ? Number(matches[0].number) : 0;
+}
+
+function optionLabelAliases(label) {
+  const text = String(label || '').trim();
+  const firstPart = text.split(/[｜|/]/)[0].trim();
+  const withoutFree = text.replace(/[（(]免費[）)]/g, '').trim();
+  return [...new Set([text, firstPart, withoutFree].filter(Boolean))];
+}
+
+function normalizeOptionText(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/\s+/g, '')
+    .replace(/[「」『』"'“”‘’。.!！?？,，、]/g, '')
+    .replace(/（免費）|\(免費\)/g, '');
+}
+
+function parseOrdinalOptionNumber(text) {
+  const value = String(text || '').trim();
+  const match = value.match(/第\s*([一二三四五六七八九十\d]+)\s*(個|項|位|種)?/);
+  if (!match) return 0;
+  return parseChineseOptionNumber(match[1]);
+}
+
+function parseChineseOptionNumber(value) {
+  const text = String(value || '').trim();
+  if (/^\d+$/.test(text)) return Number(text);
+  const normalized = text.replace(/兩/g, '二').replace(/〇/g, '零');
+  const map = { 零: 0, 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  if (normalized === '十') return 10;
+  if (normalized.startsWith('十')) return 10 + (map[normalized[1]] || 0);
+  if (normalized.includes('十')) {
+    const [tens, ones] = normalized.split('十');
+    return (map[tens] || 1) * 10 + (map[ones] || 0);
+  }
+  return map[normalized] || 0;
+}
+
 function getSession(userId, config) {
   const ttl = Number(config?.settings?.session_ttl_minutes || process.env.SESSION_TTL_MINUTES || 10) * 60 * 1000;
   const existing = sessions.get(userId);
   if (existing && Date.now() - existing.updatedAt < ttl) {
     existing.updatedAt = Date.now();
+    ensureSessionShape(existing, config);
     return existing;
   }
   const session = {
@@ -1620,9 +1731,70 @@ function getSession(userId, config) {
     booking: { service: '', artist: '', date: '', time: '', customerName: '', phone: '', note: '' },
     pendingServiceGroup: null,
     rescheduleChange: {},
+    history: [],
+    lastBotQuestion: '',
+    lastOptions: [],
+    historyLimit: getSessionHistoryLimit(config),
   };
   sessions.set(userId, session);
   return session;
+}
+
+function ensureSessionShape(session, config) {
+  session.booking = session.booking || { service: '', artist: '', date: '', time: '', customerName: '', phone: '', note: '' };
+  session.history = Array.isArray(session.history) ? session.history : [];
+  session.lastOptions = Array.isArray(session.lastOptions) ? session.lastOptions : [];
+  session.lastBotQuestion = session.lastBotQuestion || '';
+  if (config?.settings || !session.historyLimit) session.historyLimit = getSessionHistoryLimit(config);
+}
+
+function getSessionHistoryLimit(config) {
+  const turns = Number(config?.settings?.session_history_turns || process.env.SESSION_HISTORY_TURNS || 4);
+  return Math.max(4, Math.min(20, turns * 2));
+}
+
+function rememberUserMessage(session, text) {
+  rememberSessionMessage(session, 'user', text);
+}
+
+function rememberBotMessage(session, text) {
+  rememberSessionMessage(session, 'bot', text);
+  updateLastBotContext(session, text);
+}
+
+function rememberSessionMessage(session, role, text) {
+  if (!session) return;
+  ensureSessionShape(session, {});
+  session.history.push({
+    role,
+    text: String(text || '').slice(0, 1200),
+    at: nowInZone().format('YYYY-MM-DD HH:mm'),
+  });
+  while (session.history.length > session.historyLimit) session.history.shift();
+}
+
+function updateLastBotContext(session, text) {
+  const lines = String(text || '').split('\n').map((line) => line.trim()).filter(Boolean);
+  const options = [];
+  lines.forEach((line) => {
+    const match = line.match(/^(\d+)\.\s*(.+)$/);
+    if (match) options.push({ number: Number(match[1]), label: match[2].trim() });
+  });
+  if (options.length) session.lastOptions = options;
+  const question = lines.find((line) => !/^\d+\.\s*/.test(line) && !line.includes('請直接回覆'));
+  if (question) session.lastBotQuestion = question;
+}
+
+function formatSessionHistory(session) {
+  return (session.history || [])
+    .map((item) => `${item.role === 'bot' ? 'bot' : 'user'}: ${item.text}`)
+    .join(' / ');
+}
+
+function formatLastOptions(session) {
+  return (session.lastOptions || [])
+    .map((option) => `${option.number}. ${option.label}`)
+    .join(' / ');
 }
 
 async function getLineProfile(userId) {
@@ -1634,10 +1806,24 @@ async function getLineProfile(userId) {
   }
 }
 
-async function notifyShop(text) {
+async function notifyShop(text, config, type = 'general') {
   const notifyId = process.env.SHOP_NOTIFY_LINE_ID;
   if (!notifyId) return;
+  if (!shouldNotifyShop(config?.settings, type)) return;
   await lineClient.pushMessage({ to: notifyId, messages: [{ type: 'text', text }] });
+}
+
+function shouldNotifyShop(settings = {}, type = 'general') {
+  if (isSettingDisabled(settings.notify_shop_enabled)) return false;
+  const keyByType = {
+    new: 'notify_new_booking',
+    cancel: 'notify_cancel_booking',
+    reschedule: 'notify_reschedule_booking',
+    pending: 'notify_pending_request',
+  };
+  const key = keyByType[type];
+  if (!key) return true;
+  return !isSettingDisabled(settings[key]);
 }
 
 async function replyText(replyToken, text) {
@@ -1661,6 +1847,11 @@ async function safeReplyText(event, userId, text) {
       throw error;
     }
   }
+}
+
+async function replyWithMemory(event, userId, session, text) {
+  await safeReplyText(event, userId, text);
+  rememberBotMessage(session, text);
 }
 
 async function appsScriptRequest(action, data = {}) {

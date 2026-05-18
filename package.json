@@ -1,6 +1,6 @@
 {
   "name": "yuehao-ai-mvp-v3",
-  "version": "3.2.6",
+  "version": "3.3.0",
   "description": "LINE + AI provider adapter + Google Sheets booking MVP v3 for Zeabur.",
   "main": "server.js",
   "scripts": {
