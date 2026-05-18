@@ -54,6 +54,12 @@ async function handleEvent(event) {
   const userId = event.source.userId || event.source.groupId || event.source.roomId || 'unknown';
   const text = event.message.text.trim();
   try {
+    if (isFastRestartText(text)) {
+      sessions.delete(userId);
+      await safeReplyText(event, userId, buildRestartMessage());
+      return;
+    }
+
     const config = await loadConfig();
     let session = getSession(userId, config);
     rememberUserMessage(session, text);
@@ -98,15 +104,13 @@ async function handleEvent(event) {
       await replyWithMemory(event, userId, session, buildServiceOptions(config));
       return;
     }
-    if (session.step === 'start' && ['1', '2', '3'].includes(text)) {
+    if (session.step === 'start' && ['1', '2'].includes(text)) {
       if (text === '1') {
         session.step = 'ask_service';
         await replyWithMemory(event, userId, session, buildServiceOptions(config));
         return;
       }
-      const answer = text === '2'
-        ? await handleRescheduleFlow({ userId, text: '我要改時間', ai: emptyAi(), local: extractLocalBookingData('', config), session, config })
-        : await handleCancelFlow({ userId, text: '我要取消預約', ai: emptyAi(), session, config });
+      const answer = await handleRescheduleFlow({ userId, text: '我要改時間', ai: emptyAi(), local: extractLocalBookingData('', config), session, config });
       await replyWithMemory(event, userId, session, answer || '我沒有收到完整訊息，請再說一次。');
       return;
     }
@@ -797,10 +801,9 @@ function isAnyArtist(artist) {
 function buildRestartMessage() {
   return [
     '好的，已重新開始。',
-    '請問您想預約，還是需要調整已有預約呢？',
+    '請問您想預約，還是要改時間呢？',
     '1. 📅 我要預約',
     '2. ✏️ 改時間',
-    '3. ❌ 取消預約',
   ].join('\n');
 }
 
@@ -1668,6 +1671,11 @@ function resetChosenTimeIfSearchChanged(current, incoming) {
 
 function isActiveBookingSession(session) {
   return Boolean(session?.booking?.service || session?.booking?.artist || session?.booking?.date || session?.booking?.time || session?.step?.startsWith('ask_') || session?.step === 'confirm_booking');
+}
+
+function isFastRestartText(text) {
+  const normalized = String(text || '').trim();
+  return normalized === '0' || isResetText(normalized);
 }
 
 function isRestartOptionNumber(text, session) {
