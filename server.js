@@ -234,14 +234,9 @@ async function runConversation({ userId, profile, text, ai, session, config, loc
   session.booking.service = service.name;
   session.booking.duration = service.duration;
 
-  const activeArtists = config.artists || [];
+  const activeArtists = getBookableArtists(config, service);
   if (!session.booking.artist && activeArtists.length === 1) {
     session.booking.artist = activeArtists[0].name;
-  }
-
-  if (!session.booking.artist) {
-    session.step = 'ask_artist';
-    return buildArtistOptions(config, service);
   }
 
   if (!session.booking.date && session.booking.time) {
@@ -256,19 +251,6 @@ async function runConversation({ userId, profile, text, ai, session, config, loc
   if (!session.booking.date || !session.booking.time) {
     session.step = 'ask_time';
     const alternatives = findAlternativeArtistSlots(config, session.booking, service);
-    const currentArtistSlots = session.booking.artist
-      ? findAvailableStartSlots(config.slots, session.booking, service, config.settings)
-      : [];
-    if (session.booking.artist && !session.booking.date && !currentArtistSlots.length) {
-      const unavailableArtist = session.booking.artist;
-      session.booking.artist = '';
-      session.step = 'ask_artist';
-      return [
-        `${unavailableArtist} 目前沒有足夠完成「${service.name}」的連續空檔，請換其他美甲師或服務。`,
-        '',
-        buildArtistOptions(config, service),
-      ].join('\n');
-    }
     if (session.booking.artist && session.booking.date && !findAvailableStartSlots(config.slots, session.booking, service, config.settings).length && alternatives.length) {
       const unavailableArtist = session.booking.artist;
       session.booking.artist = '';
@@ -278,6 +260,10 @@ async function runConversation({ userId, profile, text, ai, session, config, loc
         '',
         buildArtistOptions(config, service),
       ].join('\n');
+    }
+    if (session.booking.date && session.booking.period && !session.booking.artist && activeArtists.length > 1) {
+      session.step = 'ask_artist';
+      return buildArtistOptions(config, service, session.booking);
     }
     return buildAvailableSlots(config, session.booking.artist, service, session.booking);
   }
@@ -793,8 +779,8 @@ function buildPartialTimeAcknowledgement(booking) {
   return '好的，我先幫您看可預約時段。';
 }
 
-function buildArtistOptions(config, service) {
-  const artists = getBookableArtists(config, service);
+function buildArtistOptions(config, service, booking = {}) {
+  const artists = getAvailableArtistsForBooking(config, service, booking);
   const showSpecialty = isSettingEnabled(config.settings.show_artist_specialty_in_line);
   return [
     `想指定哪位美甲師做「${service.name}」嗎？`,
@@ -807,6 +793,7 @@ function buildArtistOptions(config, service) {
 function buildAvailableSlots(config, artist, service, booking = {}) {
   if (!booking.date) return buildDateOptions(config, artist, service, booking);
   if (!booking.period) return buildPeriodOptions(config, artist, service, booking);
+  if (!artist) return buildArtistOptions(config, service, booking);
   const candidates = findAvailableStartSlots(config.slots, { ...booking, artist }, service, config.settings).slice(0, 11);
   if (!candidates.length) {
     return buildNoAvailableSlotsMessage(config, artist, service, booking);
@@ -821,6 +808,19 @@ function buildAvailableSlots(config, artist, service, booking = {}) {
 
 function getBookableArtists(config, service) {
   return artistsForService(config.artists, service).slice(0, 3);
+}
+
+function getAvailableArtistsForBooking(config, service, booking = {}) {
+  const artists = getBookableArtists(config, service);
+  if (!booking.date && !booking.period) return artists;
+  return artists.filter((artist) => {
+    return findAvailableStartSlots(
+      config.slots,
+      { ...booking, artist: artist.name },
+      service,
+      config.settings
+    ).length;
+  });
 }
 
 function buildDateOptions(config, artist, service, booking = {}) {
@@ -847,20 +847,26 @@ function buildPeriodOptions(config, artist, service, booking = {}) {
 }
 
 function getAvailableDateOptions(config, artist, service, booking = {}) {
-  const slots = findAvailableStartSlots(config.slots, { ...booking, artist, date: '', period: '' }, service, config.settings);
-  return [...new Set(slots.map((slot) => slot.date))].sort();
+  const artists = artist ? [{ name: artist }] : getBookableArtists(config, service);
+  const dates = artists.flatMap((item) => {
+    const slots = findAvailableStartSlots(config.slots, { ...booking, artist: item.name, date: '', period: '' }, service, config.settings);
+    return slots.map((slot) => slot.date);
+  });
+  return [...new Set(dates)].sort();
 }
 
 function getAvailablePeriodOptions(config, artist, service, booking = {}) {
-  const slots = findAvailableStartSlots(config.slots, { ...booking, artist, period: '' }, service, config.settings);
+  const artists = artist ? [{ name: artist }] : getBookableArtists(config, service);
+  const slots = artists.flatMap((item) => findAvailableStartSlots(config.slots, { ...booking, artist: item.name, period: '' }, service, config.settings));
   const periods = ['morning', 'afternoon', 'evening'];
   return periods.filter((period) => slots.some((slot) => isInPeriod(slot.time, period)));
 }
 
 function logSlotDebug(stage, config, artist, service, booking = {}, options = []) {
-  const artistSlots = (config.slots || []).filter((slot) => !artist || slot.artist === artist);
+  const debugArtists = artist ? [artist] : getBookableArtists(config, service).map((item) => item.name);
+  const artistSlots = (config.slots || []).filter((slot) => !debugArtists.length || debugArtists.includes(slot.artist));
   const openSlots = artistSlots.filter((slot) => isSlotOpenForBooking(slot));
-  const starts = service ? findAvailableStartSlots(config.slots || [], { ...booking, artist }, service, config.settings || {}) : [];
+  const starts = service ? debugArtists.flatMap((name) => findAvailableStartSlots(config.slots || [], { ...booking, artist: name }, service, config.settings || {})) : [];
   console.log(`SLOT_DEBUG ${JSON.stringify({
     stage,
     artist,
@@ -1708,7 +1714,7 @@ function applyQuickReplyNumber(text, session, config) {
   }
   if (session.step === 'ask_artist') {
     const service = findService(config.services, session.booking.service);
-    const artists = service ? getBookableArtists(config, service) : (config.artists || []).slice(0, 3);
+    const artists = service ? getAvailableArtistsForBooking(config, service, session.booking) : (config.artists || []).slice(0, 3);
     if (artists[index]) session.booking.artist = artists[index].name;
   }
   if (session.step === 'ask_time') {
