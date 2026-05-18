@@ -2156,7 +2156,7 @@ async function appsScriptRequest(action, data = {}) {
     requiredEnv('APPS_SCRIPT_WEB_APP_URL'),
     {
       action,
-      token: requiredEnv('APPS_SCRIPT_API_TOKEN'),
+      token: String(requiredEnv('APPS_SCRIPT_API_TOKEN')).trim(),
       ...data,
     },
     { timeout: 20000 }

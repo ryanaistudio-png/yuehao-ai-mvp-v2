@@ -74,7 +74,9 @@ function doPost(e) {
     const payload = JSON.parse(e.postData.contents || '{}');
     const ss = getAppSpreadsheet_();
     const settings = readSettings_(ss);
-    if (!settings.api_token || payload.token !== String(settings.api_token)) {
+    const expectedToken = String(settings.api_token || '').trim();
+    const receivedToken = String(payload.token || '').trim();
+    if (!expectedToken || receivedToken !== expectedToken) {
       return jsonResponse_({ ok: false, error: 'Unauthorized' });
     }
 
