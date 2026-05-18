@@ -837,7 +837,6 @@ function buildWeekView_(ss) {
   const sheet = ss.getSheetByName(SHEETS.week);
   const weekStart = getSelectedWeekStart_(sheet.getRange('B2').getValue());
   const settings = readSettings_(ss);
-  const artists = readArtists_(ss).filter((artist) => artist.status === '可接單');
   const bookings = readBookings_(ss).filter((booking) => booking.status !== '已取消');
   const fixed = readFixedSchedule_(ss);
   const specials = readSpecialDays_(ss);
@@ -845,6 +844,19 @@ function buildWeekView_(ss) {
   const dayStart = timeToMinutes_(settings.day_start_time || '10:00');
   const dayEnd = timeToMinutes_(settings.day_end_time || '21:00');
   const days = Array.from({ length: 7 }, (_v, i) => addDays_(weekStart, i));
+  const weekDates = new Set(days.map((date) => formatDate_(date)));
+  const artistMap = new Map();
+  readArtists_(ss)
+    .filter((artist) => artist.status === '可接單')
+    .forEach((artist) => artistMap.set(artist.name, artist));
+  bookings
+    .filter((booking) => weekDates.has(booking.date) && booking.artist)
+    .forEach((booking) => {
+      if (!artistMap.has(booking.artist)) {
+        artistMap.set(booking.artist, { name: booking.artist, status: '預約中', sort: 999, note: '' });
+      }
+    });
+  const artists = [...artistMap.values()].sort((a, b) => a.sort - b.sort || a.name.localeCompare(b.name));
 
   sheet.getRange('A3:H500').clearContent().clearFormat().clearDataValidations();
   let row = 3;

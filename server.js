@@ -1243,6 +1243,8 @@ function answerArtistStatusQuery(text, config, local) {
     `${formatFriendlyDateTime(date, time)} 的美甲師狀態：`,
     ...lines,
     '如果想預約，請告訴我服務項目。',
+    '',
+    buildServiceOptions(config),
   ].join('\n');
 }
 
