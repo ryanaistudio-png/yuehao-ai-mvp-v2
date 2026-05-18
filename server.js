@@ -613,9 +613,32 @@ function fallbackExtract(text, config = { services: [], artists: [] }) {
 async function loadConfig() {
   if (cache.data && Date.now() < cache.expiresAt) return cache.data;
   const data = await appsScriptRequest('getConfig');
-  cache.data = data;
+  cache.data = normalizeConfig(data);
   cache.expiresAt = Date.now() + 60 * 1000;
   return cache.data;
+}
+
+function normalizeConfig(data = {}) {
+  return {
+    ...data,
+    services: (data.services || []).map((service) => ({
+      ...service,
+      name: String(service.name || '').trim(),
+    })),
+    artists: (data.artists || []).map((artist) => ({
+      ...artist,
+      name: String(artist.name || '').trim(),
+      status: String(artist.status || '').trim(),
+      note: String(artist.note || '').trim(),
+    })),
+    slots: (data.slots || []).map((slot) => ({
+      ...slot,
+      artist: String(slot.artist || '').trim(),
+      status: String(slot.status || '').trim(),
+      lockedBookingId: String(slot.lockedBookingId || '').trim(),
+      time: normalizeTime(slot.time),
+    })),
+  };
 }
 
 async function createBooking({ userId, lineDisplayName, booking, service }) {
@@ -682,13 +705,12 @@ async function releaseLockedSlots(bookingId) {
 }
 
 function buildServiceOptions(config) {
-  const groups = buildServiceGroups(config.services);
+  const services = (config.services || []).slice(0, 12);
   return [
-    '想預約哪一類服務呢？',
-    ...groups.map((group, index) => `${index + 1}. 約 ${group.duration} 分鐘｜${formatServiceGroupNames(group.services)}`),
+    '想預約什麼服務？',
+    ...services.map((service, index) => `${index + 1}. ${formatServiceMenuName(service)}｜${service.duration} 分鐘｜${formatServicePrice(service)}`),
     restartOptionLine(),
-    '如果還不知道款式，可以選「款式諮詢/簡易服務」。',
-    '請直接回覆編號。',
+    '可以點下方選項，也可以直接輸入服務名稱。',
   ].join('\n');
 }
 
@@ -756,7 +778,7 @@ function buildPartialTimeAcknowledgement(booking) {
 }
 
 function buildArtistOptions(config, service) {
-  const artists = artistsForService(config.artists, service);
+  const artists = getBookableArtists(config, service);
   const showSpecialty = isSettingEnabled(config.settings.show_artist_specialty_in_line);
   return [
     `想指定哪位美甲師做「${service.name}」嗎？`,
@@ -767,16 +789,55 @@ function buildArtistOptions(config, service) {
 }
 
 function buildAvailableSlots(config, artist, service, booking = {}) {
-  const candidates = findAvailableStartSlots(config.slots, { ...booking, artist }, service, config.settings).slice(0, 8);
+  if (!booking.date) return buildDateOptions(config, artist, service, booking);
+  if (!booking.period) return buildPeriodOptions(config, artist, service, booking);
+  const candidates = findAvailableStartSlots(config.slots, { ...booking, artist }, service, config.settings).slice(0, 11);
   if (!candidates.length) {
     return buildNoAvailableSlotsMessage(config, artist, service, booking);
   }
   return [
-    `${artist} 做「${service.name}」約 ${service.duration} 分鐘，可以預約以下時段：`,
+    `${artist} 做「${service.name}」約 ${service.duration} 分鐘，${booking.date} ${periodLabel(booking.period)}可以預約以下時段：`,
     ...candidates.map((slot, index) => `${index + 1}. ${slot.date} ${slot.time}｜${slot.artist}`),
     restartOptionLine(),
     '請直接回覆上面的編號數字，或輸入您希望的日期與時間（例如：5/20 1600）。',
   ].join('\n');
+}
+
+function getBookableArtists(config, service) {
+  return artistsForService(config.artists, service).slice(0, 3);
+}
+
+function buildDateOptions(config, artist, service, booking = {}) {
+  const dates = getAvailableDateOptions(config, artist, service, booking).slice(0, 10);
+  if (!dates.length) return buildNoAvailableSlotsMessage(config, artist, service, booking);
+  return [
+    `${artist} 做「${service.name}」約 ${service.duration} 分鐘，想預約哪一天？`,
+    ...dates.map((date, index) => `${index + 1}. ${formatDateWithWeekday(date)}`),
+    restartOptionLine(),
+    '也可以直接輸入日期，例如：5/20。',
+  ].join('\n');
+}
+
+function buildPeriodOptions(config, artist, service, booking = {}) {
+  const periods = getAvailablePeriodOptions(config, artist, service, booking);
+  if (!periods.length) return buildNoAvailableSlotsMessage(config, artist, service, booking);
+  return [
+    `${artist} 做「${service.name}」，${formatDateWithWeekday(booking.date)} 想預約哪個時段？`,
+    ...periods.map((period, index) => `${index + 1}. ${periodLabel(period)}`),
+    restartOptionLine(),
+    '也可以直接輸入時間，例如：11:00。',
+  ].join('\n');
+}
+
+function getAvailableDateOptions(config, artist, service, booking = {}) {
+  const slots = findAvailableStartSlots(config.slots, { ...booking, artist, date: '', period: '' }, service, config.settings);
+  return [...new Set(slots.map((slot) => slot.date))].sort();
+}
+
+function getAvailablePeriodOptions(config, artist, service, booking = {}) {
+  const slots = findAvailableStartSlots(config.slots, { ...booking, artist, period: '' }, service, config.settings);
+  const periods = ['morning', 'afternoon', 'evening'];
+  return periods.filter((period) => slots.some((slot) => isInPeriod(slot.time, period)));
 }
 
 function restartOptionLine() {
@@ -1389,7 +1450,7 @@ function adjustAmbiguousTimeWithContext(booking, text, currentBooking = {}, sett
 
   const contextPeriod = booking.period || currentBooking?.period || '';
   const dayStartHour = Math.floor(timeToMinutes(settings.day_start_time || '10:00') / 60);
-  if (contextPeriod === 'afternoon' || contextPeriod === 'evening' || hour < dayStartHour) {
+  if ((['afternoon', 'evening'].includes(contextPeriod) && hour <= 6) || hour < dayStartHour) {
     hour += 12;
     booking.time = `${String(hour).padStart(2, '0')}:${minuteText || '00'}`;
   }
@@ -1599,15 +1660,9 @@ function applyQuickReplyNumber(text, session, config) {
   if (text.trim() === '0') return;
   const index = Number(text.trim()) - 1;
   if (session.step === 'ask_service') {
-    const group = buildServiceGroups(config.services)[index];
-    if (!group) return;
-    if (group.services.length === 1) {
-      session.booking.service = group.services[0].name;
-      session.pendingServiceGroup = null;
-      return;
-    }
-    session.pendingServiceGroup = group;
-    session.step = 'ask_service_detail';
+    const service = (config.services || []).slice(0, 12)[index];
+    if (service) session.booking.service = service.name;
+    session.pendingServiceGroup = null;
     return;
   }
   if (session.step === 'ask_service_detail' && session.pendingServiceGroup?.services?.[index]) {
@@ -1617,12 +1672,29 @@ function applyQuickReplyNumber(text, session, config) {
   }
   if (session.step === 'ask_artist') {
     const service = findService(config.services, session.booking.service);
-    const artists = service ? artistsForService(config.artists, service) : config.artists;
+    const artists = service ? getBookableArtists(config, service) : (config.artists || []).slice(0, 3);
     if (artists[index]) session.booking.artist = artists[index].name;
   }
   if (session.step === 'ask_time') {
     const service = findService(config.services, session.booking.service);
     if (!service) return;
+    if (!session.booking.date) {
+      const date = getAvailableDateOptions(config, session.booking.artist, service, session.booking)[index];
+      if (date) {
+        session.booking.date = date;
+        session.booking.period = '';
+        session.booking.time = '';
+      }
+      return;
+    }
+    if (!session.booking.period) {
+      const period = getAvailablePeriodOptions(config, session.booking.artist, service, session.booking)[index];
+      if (period) {
+        session.booking.period = period;
+        session.booking.time = '';
+      }
+      return;
+    }
     const slots = findAvailableStartSlots(config.slots, session.booking, service, config.settings);
     if (slots[index]) {
       session.booking.artist = slots[index].artist;
@@ -1827,9 +1899,12 @@ function shouldNotifyShop(settings = {}, type = 'general') {
 }
 
 async function replyText(replyToken, text) {
+  const message = { type: 'text', text: String(text).slice(0, 4500) };
+  const quickReply = buildQuickReplyFromText(text);
+  if (quickReply) message.quickReply = quickReply;
   await lineClient.replyMessage({
     replyToken,
-    messages: [{ type: 'text', text: String(text).slice(0, 4500) }],
+    messages: [message],
   });
 }
 
@@ -1839,14 +1914,39 @@ async function safeReplyText(event, userId, text) {
   } catch (error) {
     console.error('replyText failed, trying pushMessage:', error.response?.data || error.message);
     if (userId && userId.startsWith('U')) {
+      const message = { type: 'text', text: String(text).slice(0, 4500) };
+      const quickReply = buildQuickReplyFromText(text);
+      if (quickReply) message.quickReply = quickReply;
       await lineClient.pushMessage({
         to: userId,
-        messages: [{ type: 'text', text: String(text).slice(0, 4500) }],
+        messages: [message],
       });
     } else {
       throw error;
     }
   }
+}
+
+function buildQuickReplyFromText(text) {
+  const items = String(text || '')
+    .split('\n')
+    .map((line) => line.trim().match(/^(\d+)\.\s*(.+)$/))
+    .filter(Boolean)
+    .slice(0, 13)
+    .map((match) => ({
+      type: 'action',
+      action: {
+        type: 'message',
+        label: truncateQuickReplyLabel(match[2]),
+        text: match[1],
+      },
+    }));
+  return items.length ? { items } : null;
+}
+
+function truncateQuickReplyLabel(label) {
+  const text = String(label || '').replace(/\s+/g, ' ').trim();
+  return text.length > 20 ? `${text.slice(0, 19)}…` : text;
 }
 
 async function replyWithMemory(event, userId, session, text) {
