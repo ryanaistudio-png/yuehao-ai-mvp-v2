@@ -176,7 +176,11 @@ async function handleEvent(event) {
     await replyWithMemory(event, userId, session, answer || '我沒有收到完整訊息，請再說一次。');
   } catch (error) {
     console.error('handleEvent failed:', formatErrorForLog(error));
-    await safeReplyText(event, userId, '系統暫時忙碌，請稍後再試；若急著預約，請直接聯絡店家協助。');
+    await safeReplyText(event, userId, [
+      '系統暫時忙碌，請稍後再試；若急著預約，請直接聯絡店家協助。',
+      '',
+      restartOptionLine(),
+    ].join('\n'));
   }
 }
 
