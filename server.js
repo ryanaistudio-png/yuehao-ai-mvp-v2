@@ -800,7 +800,6 @@ function isAnyArtist(artist) {
 
 function buildRestartMessage() {
   return [
-    '好的，已重新開始。',
     '請問您想預約，還是要改時間呢？',
     '1. 📅 我要預約',
     '2. ✏️ 改時間',
@@ -826,6 +825,9 @@ function buildPartialTimeAcknowledgement(booking) {
 function buildArtistOptions(config, service, booking = {}) {
   const artists = getAvailableArtistsForBooking(config, service, booking);
   const showSpecialty = isSettingEnabled(config.settings.show_artist_specialty_in_line);
+  if (!artists.length) {
+    return buildNoAvailableSlotsMessage(config, '', service, booking);
+  }
   return [
     `想指定哪位美甲師做「${service.name}」嗎？`,
     ...artists.map((artist, index) => showSpecialty && artist.note ? `${index + 1}. ${artist.name}｜${artist.note}` : `${index + 1}. ${artist.name}`),
@@ -857,7 +859,16 @@ function getBookableArtists(config, service) {
 }
 
 function getAvailableArtistsForBooking(config, service, booking = {}) {
-  return getBookableArtists(config, service);
+  const artists = getBookableArtists(config, service);
+  if (!booking.date || !booking.period) return artists;
+  return artists.filter((artist) => (
+    findAvailableStartSlots(
+      config.slots,
+      { ...booking, artist: artist.name },
+      service,
+      config.settings
+    ).length
+  ));
 }
 
 function buildDateOptions(config, artist, service, booking = {}) {
