@@ -1460,3 +1460,18 @@ function getAppSpreadsheet_() {
   if (!ss) throw new Error('找不到 Google Sheet。若使用獨立 Apps Script，請先填入 SPREADSHEET_ID。');
   return ss;
 }
+
+function debugSystemTarget() {
+  const ss = getAppSpreadsheet_();
+  const bookingSheet = ss.getSheetByName(SHEETS.bookings);
+  const slotSheet = ss.getSheetByName(SHEETS.slots);
+  return {
+    spreadsheetId: ss.getId(),
+    spreadsheetName: ss.getName(),
+    spreadsheetUrl: ss.getUrl(),
+    bookingSheetName: SHEETS.bookings,
+    bookingLastRow: bookingSheet ? bookingSheet.getLastRow() : 0,
+    slotLastRow: slotSheet ? slotSheet.getLastRow() : 0,
+    sheets: ss.getSheets().map((sheet) => sheet.getName()),
+  };
+}

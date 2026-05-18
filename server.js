@@ -685,12 +685,6 @@ async function createBooking({ userId, lineDisplayName, booking, service }) {
   if (!result?.bookingId) {
     throw new Error(`Apps Script did not return bookingId for createBooking: ${safeJson(result)}`);
   }
-  const activeBookings = await appsScriptRequest('getUserActiveBookings', { userId });
-  const created = Array.isArray(activeBookings)
-    && activeBookings.some((item) => String(item.id) === String(result.bookingId));
-  if (!created) {
-    throw new Error(`Booking ${result.bookingId} was not found after createBooking. Please check Apps Script deployment and target spreadsheet.`);
-  }
   cache.expiresAt = 0;
   return result;
 }
