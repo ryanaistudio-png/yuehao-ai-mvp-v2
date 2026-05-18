@@ -37,7 +37,7 @@ const TAB_ORDER = [
 
 // 如果 Apps Script 是從 Google Sheet 內開啟，可以留空。
 // 如果是從 https://script.google.com/home 建立獨立專案，請填入 Google Sheet 網址 /d/ 和 /edit 中間那串 ID。
-const SPREADSHEET_ID = '';
+const SPREADSHEET_ID = '1e-fz48STCograxywrKQSkK56WZ1C7-YwU0ZwPmfwyyY';
 
 function onOpen() {
   SpreadsheetApp.getUi()
