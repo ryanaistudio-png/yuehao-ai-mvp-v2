@@ -394,6 +394,7 @@ function getDefaultSettingRows_() {
     ['設定鍵', '設定值', '說明'],
     ['shop_name', 'Demo 美甲工作室', '店名'],
     ['shop_address', '台北市信義區 Demo 路 1 號', '預約成功傳給客人'],
+    ['shop_phone', '', '系統忙碌時提供給客人聯絡店家'],
     ['business_hours', '週二至週日 10:00-20:00，週一公休', '給 AI 回答用'],
     ['booking_days_ahead', 30, 'LINE 可查未來幾天'],
     ['min_hours_before_booking', 2, '最少提前幾小時預約'],

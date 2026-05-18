@@ -53,6 +53,7 @@ async function handleEvent(event) {
 
   const userId = event.source.userId || event.source.groupId || event.source.roomId || 'unknown';
   const text = event.message.text.trim();
+  let config = null;
   try {
     if (isFastRestartText(text)) {
       sessions.delete(userId);
@@ -60,7 +61,7 @@ async function handleEvent(event) {
       return;
     }
 
-    const config = await loadConfig();
+    config = await loadConfig();
     let session = getSession(userId, config);
     rememberUserMessage(session, text);
 
@@ -176,11 +177,7 @@ async function handleEvent(event) {
     await replyWithMemory(event, userId, session, answer || '我沒有收到完整訊息，請再說一次。');
   } catch (error) {
     console.error('handleEvent failed:', formatErrorForLog(error));
-    await safeReplyText(event, userId, [
-      '系統暫時忙碌，請稍後再試；若急著預約，請直接聯絡店家協助。',
-      '',
-      restartOptionLine(),
-    ].join('\n'));
+    await safeReplyText(event, userId, buildBusyMessage(config));
   }
 }
 
@@ -802,6 +799,27 @@ function buildRestartMessage() {
     '1. 📅 我要預約',
     '2. ✏️ 改時間',
   ].join('\n');
+}
+
+function buildBusyMessage(config) {
+  const phone = getShopPhone(config);
+  return [
+    phone
+      ? `系統暫時忙碌，請稍後再試；若急著預約，請直接聯絡店家：${phone}`
+      : '系統暫時忙碌，請稍後再試；若急著預約，請直接聯絡店家協助。',
+    '',
+    restartOptionLine(),
+  ].join('\n');
+}
+
+function getShopPhone(config) {
+  return String(
+    process.env.SHOP_PHONE
+    || config?.settings?.shop_phone
+    || config?.settings?.store_phone
+    || config?.settings?.phone
+    || ''
+  ).trim();
 }
 
 function buildPartialTimeAcknowledgement(booking) {
