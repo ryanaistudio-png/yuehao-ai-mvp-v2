@@ -171,7 +171,7 @@ async function handleEvent(event) {
     const answer = await runConversation({ userId, profile, text, ai, session, config, local });
     await replyWithMemory(event, userId, session, answer || '我沒有收到完整訊息，請再說一次。');
   } catch (error) {
-    console.error('handleEvent failed:', error);
+    console.error('handleEvent failed:', formatErrorForLog(error));
     await safeReplyText(event, userId, '系統暫時忙碌，請稍後再試；若急著預約，請直接聯絡店家協助。');
   }
 }
@@ -678,6 +678,15 @@ async function createBooking({ userId, lineDisplayName, booking, service }) {
       lineDisplayName: lineDisplayName || '',
     },
   });
+  if (!result?.bookingId) {
+    throw new Error(`Apps Script did not return bookingId for createBooking: ${safeJson(result)}`);
+  }
+  const activeBookings = await appsScriptRequest('getUserActiveBookings', { userId });
+  const created = Array.isArray(activeBookings)
+    && activeBookings.some((item) => String(item.id) === String(result.bookingId));
+  if (!created) {
+    throw new Error(`Booking ${result.bookingId} was not found after createBooking. Please check Apps Script deployment and target spreadsheet.`);
+  }
   cache.expiresAt = 0;
   return result;
 }
@@ -829,6 +838,7 @@ function buildAvailableSlots(config, artist, service, booking = {}) {
   if (!artist) return buildArtistOptions(config, service, booking);
   const candidates = findAvailableStartSlots(config.slots, { ...booking, artist }, service, config.settings).slice(0, 11);
   if (!candidates.length) {
+    logSlotDebug('time_options_empty', config, artist, service, booking, candidates);
     return buildNoAvailableSlotsMessage(config, artist, service, booking);
   }
   return [
@@ -1030,7 +1040,7 @@ function findConsecutiveSlots(slots, booking, service, settings, ignoreBookingId
 }
 
 function isSlotOpenForBooking(slot, ignoreBookingId = '') {
-  if (slot.status === '可預約' && !slot.lockedBookingId) return true;
+  if (['可預約', '可約', 'available', 'open'].includes(String(slot.status || '').trim()) && !slot.lockedBookingId) return true;
   return Boolean(ignoreBookingId && slot.lockedBookingId && String(slot.lockedBookingId) === String(ignoreBookingId));
 }
 
@@ -2103,6 +2113,23 @@ async function appsScriptRequest(action, data = {}) {
     throw new Error(response.data?.error || `Apps Script action failed: ${action}`);
   }
   return response.data.data;
+}
+
+function safeJson(value) {
+  try {
+    return JSON.stringify(value);
+  } catch (_error) {
+    return String(value);
+  }
+}
+
+function formatErrorForLog(error) {
+  return {
+    message: error?.message || String(error),
+    status: error?.response?.status,
+    data: error?.response?.data,
+    stack: error?.stack,
+  };
 }
 
 function isBookingFarEnough(booking, settings) {
