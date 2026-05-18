@@ -860,6 +860,7 @@ function buildWeekView_(ss) {
 
   sheet.getRange('A3:H500').clearContent().clearFormat().clearDataValidations();
   let row = 3;
+  const statusRanges = [];
   artists.forEach((artist) => {
     sheet.getRange(row, 1, 1, 8).setValues([[`${artist.name} 一週預約`, '', '', '', '', '', '', '']]);
     styleBand_(sheet.getRange(row, 1, 1, 8));
@@ -887,9 +888,10 @@ function buildWeekView_(ss) {
       rows.push(line);
     }
     sheet.getRange(row, 1, rows.length, 8).setValues(rows);
-    styleWeekStatus_(sheet, row, rows.length);
+    styleWeekStatus_(sheet, row, rows.length, statusRanges);
     row += rows.length + 2;
   });
+  applyWeekStatusRules_(sheet, statusRanges);
 }
 
 function buildBookingQuery_(ss) {
@@ -1376,16 +1378,24 @@ function styleBand_(range) {
   range.merge().setBackground('#dbeafe').setFontWeight('bold');
 }
 
-function styleWeekStatus_(sheet, startRow, numRows) {
+function styleWeekStatus_(sheet, startRow, numRows, statusRanges) {
   const range = sheet.getRange(startRow, 2, numRows, 7);
   range.setWrap(true);
+  if (Array.isArray(statusRanges)) statusRanges.push(range);
+}
+
+function applyWeekStatusRules_(sheet, ranges) {
+  if (!ranges.length) {
+    sheet.setConditionalFormatRules([]);
+    return;
+  }
   const rules = [
-    SpreadsheetApp.newConditionalFormatRule().whenTextContains('已完成').setBackground('#ede9fe').setRanges([range]).build(),
-    SpreadsheetApp.newConditionalFormatRule().whenTextContains('待確認').setBackground('#fef3c7').setRanges([range]).build(),
-    SpreadsheetApp.newConditionalFormatRule().whenTextContains('已確認').setBackground('#dbeafe').setRanges([range]).build(),
-    SpreadsheetApp.newConditionalFormatRule().whenTextContains('已取消').setBackground('#fee2e2').setRanges([range]).build(),
-    SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('休假').setBackground('#e5e7eb').setRanges([range]).build(),
-    SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('可約').setBackground('#f0fdf4').setRanges([range]).build(),
+    SpreadsheetApp.newConditionalFormatRule().whenTextContains('已完成').setBackground('#ede9fe').setRanges(ranges).build(),
+    SpreadsheetApp.newConditionalFormatRule().whenTextContains('待確認').setBackground('#fef3c7').setRanges(ranges).build(),
+    SpreadsheetApp.newConditionalFormatRule().whenTextContains('已確認').setBackground('#dbeafe').setRanges(ranges).build(),
+    SpreadsheetApp.newConditionalFormatRule().whenTextContains('已取消').setBackground('#fee2e2').setRanges(ranges).build(),
+    SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('休假').setBackground('#e5e7eb').setRanges(ranges).build(),
+    SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('可約').setBackground('#f0fdf4').setRanges(ranges).build(),
   ];
   sheet.setConditionalFormatRules(rules);
 }
