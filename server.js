@@ -570,7 +570,7 @@ async function handleStaffFlow({ userId, text, session, config }) {
   if (dateLookup || session.step === 'staff_date_lookup') {
     const date = dateLookup || parseDateText(text);
     if (!date) return withStaffHomeAction('請輸入要查詢的日期，例如「查日期 5/20」或「明天」。');
-    session.step = 'staff_menu';
+    session.step = 'staff_date_lookup';
     return buildStoreDateBookings(await loadStoreBookingsByDate(date), date);
   }
 
@@ -650,6 +650,7 @@ function isStaffCommandText(text, session) {
     || text === '店家模式'
     || text === '今日預約'
     || text === '明日預約'
+    || Boolean(parseDateText(text))
     || /^查日期/.test(text)
     || /^查預約\s*\d+/.test(text)
     || /^修改\s*(預約\s*)?\d+/.test(text)
