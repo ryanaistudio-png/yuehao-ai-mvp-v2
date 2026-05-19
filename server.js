@@ -560,14 +560,18 @@ async function handleStaffFlow({ userId, text, session, config }) {
     const bookingId = lookupId || normalizeShortBookingInput(text);
     if (!bookingId) return withStaffHomeAction('請輸入要查詢的預約編號，例如「查預約 001」。');
     session.step = 'staff_menu';
-    return withStaffHomeAction(formatStoreBooking(await loadStoreBooking(bookingId)));
+    const booking = await tryLoadStoreBooking(bookingId);
+    if (!booking.ok) return withStaffHomeAction(booking.message);
+    return withStaffHomeAction(formatStoreBooking(booking.data));
   }
 
   const cancelId = /^取消\s*\d+|^取消\s*預約\s*\d+/.test(text) ? normalizeShortBookingInput(text) : '';
   if (cancelId || session.step === 'staff_cancel_wait_id') {
     const bookingId = cancelId || normalizeShortBookingInput(text);
     if (!bookingId) return withStaffHomeAction('請輸入要取消的預約編號，例如「取消 001」。');
-    const booking = await loadStoreBooking(bookingId);
+    const loaded = await tryLoadStoreBooking(bookingId);
+    if (!loaded.ok) return withStaffHomeAction(loaded.message);
+    const booking = loaded.data;
     session.step = 'staff_cancel_confirm';
     session.staffCancelBooking = booking;
     return [
@@ -584,7 +588,9 @@ async function handleStaffFlow({ userId, text, session, config }) {
   if (modifyId || session.step === 'staff_reschedule_wait_id') {
     const bookingId = modifyId || normalizeShortBookingInput(text);
     if (!bookingId) return withStaffHomeAction('請輸入要修改的預約編號，例如「修改 001」。');
-    const booking = await loadStoreBooking(bookingId);
+    const loaded = await tryLoadStoreBooking(bookingId);
+    if (!loaded.ok) return withStaffHomeAction(loaded.message);
+    const booking = loaded.data;
     session.step = 'staff_reschedule_change';
     session.staffBooking = booking;
     session.staffChange = {};
@@ -601,6 +607,22 @@ async function handleStaffFlow({ userId, text, session, config }) {
   }
 
   return '';
+}
+
+async function tryLoadStoreBooking(bookingId) {
+  try {
+    return { ok: true, data: await loadStoreBooking(bookingId) };
+  } catch (error) {
+    if (isExpectedBookingLookupError(error)) {
+      return { ok: false, message: `${error.message}\n請確認編號後再試一次，例如「查預約 001」。` };
+    }
+    throw error;
+  }
+}
+
+function isExpectedBookingLookupError(error) {
+  const message = String(error?.message || '');
+  return message.includes('找不到預約編號') || message.includes('找到多筆短編號') || message.includes('請輸入預約編號');
 }
 
 function isStaffCommandText(text, session) {
