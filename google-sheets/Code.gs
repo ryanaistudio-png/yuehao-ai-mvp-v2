@@ -157,12 +157,15 @@ function refreshSystemData(showUi) {
   buildWeekView_(ss);
   buildBookingQuery_(ss);
   rebuildCustomers_(ss);
+  applyBookingStatusRowRules_(ss);
   if (showUi !== false) safeUiAlert_('已更新預約畫面。');
 }
 
 function refreshApiBookingData_(ss) {
   rebuildAvailableSlots_(ss);
   rebuildCustomers_(ss);
+  buildBookingQuery_(ss);
+  applyBookingStatusRowRules_(ss);
   SpreadsheetApp.flush();
 }
 
@@ -581,6 +584,7 @@ function fillEditCurrentBooking_(sheet, booking) {
 
 function createManualBooking_(ss, values) {
   if (!values.artist || !values.service || !values.date || !values.startTime) throw new Error('新增預約需要美甲師、服務、日期、開始時間。');
+  if (values.phone && !isValidTaiwanMobile_(values.phone)) throw new Error('手機號碼格式不正確，請輸入 09 開頭的 10 碼手機號碼。');
   const service = findService_(ss, values.service, true);
   const start = timeToMinutes_(values.startTime);
   const duration = values.duration || service.duration;
@@ -660,6 +664,7 @@ function createApiBooking_(ss, booking) {
   if (!booking.artist || !booking.service || !booking.date || !booking.time || !booking.customerName || !booking.phone) {
     throw new Error('預約資料不足');
   }
+  if (!isValidTaiwanMobile_(booking.phone)) throw new Error('手機號碼格式不正確，請輸入 09 開頭的 10 碼手機號碼。');
   const service = findService_(ss, booking.service, false);
   const start = timeToMinutes_(booking.time);
   const end = start + service.duration;
@@ -729,6 +734,8 @@ function getApiUserActiveBookings_(ss, userId) {
 
 function getApiCustomerProfile_(ss, userId) {
   if (!userId) return null;
+  const customer = getCustomerProfileFromDatabase_(ss, userId);
+  if (customer) return customer;
   const bookings = readBookings_(ss)
     .filter((booking) => booking.lineUserId === userId && (booking.customer || booking.phone))
     .sort((a, b) => String(b.date).localeCompare(String(a.date)) || b.startMinutes - a.startMinutes);
@@ -739,6 +746,21 @@ function getApiCustomerProfile_(ss, userId) {
     phone: latest.phone,
     lineUserId: latest.lineUserId,
     lineDisplayName: latest.lineDisplayName,
+  };
+}
+
+function getCustomerProfileFromDatabase_(ss, userId) {
+  const sheet = ss.getSheetByName(SHEETS.customers);
+  if (!sheet || !userId) return null;
+  const rows = sheet.getRange(2, 1, Math.max(sheet.getLastRow() - 1, 1), 14).getValues();
+  const row = rows.find((item) => item[3] === userId);
+  if (!row) return null;
+  if (!row[1] && !row[2]) return null;
+  return {
+    customerName: row[1] || '',
+    phone: row[2] || '',
+    lineUserId: row[3] || '',
+    lineDisplayName: row[4] || '',
   };
 }
 
@@ -1003,6 +1025,7 @@ function buildBookingQuery_(ss) {
   if (rows.length) sheet.getRange(4, 1, rows.length, 11).setValues(rows);
   sheet.getRange('C4:C5000').setNumberFormat('yyyy-mm-dd');
   sheet.getRange('D4:E5000').setNumberFormat('hh:mm');
+  applyBookingStatusRowRules_(ss);
 }
 
 function rebuildCustomers_(ss) {
@@ -1023,8 +1046,8 @@ function rebuildCustomers_(ss) {
     const active = bookings.filter((booking) => booking.status !== '已取消');
     return [
       old[0] || `C${String(index + 1).padStart(4, '0')}`,
-      latest.customer,
-      latest.phone,
+      old[1] || latest.customer,
+      old[2] || latest.phone,
       latest.lineUserId,
       latest.lineDisplayName,
       old[5] || '未填',
@@ -1080,6 +1103,10 @@ function parseBookingRow_(row) {
     paymentStatus: row[16] || '',
     paidAmount: row[17] || '',
   };
+}
+
+function isValidTaiwanMobile_(phone) {
+  return /^09\d{8}$/.test(String(phone || '').trim());
 }
 
 function findBookingAt_(bookings, artist, dateText, minutes) {
@@ -1505,6 +1532,30 @@ function styleSlotStatus_(sheet) {
     SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('已預約').setBackground('#dbeafe').setRanges([range]).build(),
   ];
   sheet.setConditionalFormatRules(rules);
+}
+
+function applyBookingStatusRowRules_(ss) {
+  const canceledColor = '#e5e7eb';
+  const query = ss.getSheetByName(SHEETS.query);
+  if (query) {
+    query.setConditionalFormatRules([
+      SpreadsheetApp.newConditionalFormatRule()
+        .whenFormulaSatisfied('=$B4="已取消"')
+        .setBackground(canceledColor)
+        .setRanges([query.getRange('A4:K5000')])
+        .build(),
+    ]);
+  }
+  const bookings = ss.getSheetByName(SHEETS.bookings);
+  if (bookings) {
+    bookings.setConditionalFormatRules([
+      SpreadsheetApp.newConditionalFormatRule()
+        .whenFormulaSatisfied('=$B3="已取消"')
+        .setBackground(canceledColor)
+        .setRanges([bookings.getRange('A3:T5000')])
+        .build(),
+    ]);
+  }
 }
 
 function getSelectedWeekStart_(value) {

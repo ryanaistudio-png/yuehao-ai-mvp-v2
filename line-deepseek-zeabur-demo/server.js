@@ -326,6 +326,11 @@ async function runConversation({ userId, profile, text, ai, session, config, loc
     await hydrateKnownCustomer(session, userId);
   }
 
+  if (session.step === 'ask_contact' && /\d/.test(text) && !extractTaiwanMobile(text)) {
+    session.booking.phone = '';
+    return '手機號碼格式不正確，請留下 09 開頭的 10 碼手機號碼，例如：王小美 0912345678。';
+  }
+
   if (!session.booking.customerName || !session.booking.phone) {
     const selectedTimeThisTurn = Boolean(local.booking.time || ai.booking?.time || (session.step === 'ask_time' && /^\d+$/.test(text.trim())));
     session.step = 'ask_contact';
@@ -339,6 +344,12 @@ async function runConversation({ userId, profile, text, ai, session, config, loc
       ].join('\n');
     }
     return '最後請留下姓名與手機，例如：王小美 0912345678。';
+  }
+
+  if (!isValidTaiwanMobile(session.booking.phone)) {
+    session.booking.phone = '';
+    session.step = 'ask_contact';
+    return '手機號碼格式不正確，請留下 09 開頭的 10 碼手機號碼，例如：王小美 0912345678。';
   }
 
   if (session.step !== 'confirm_booking') {
@@ -916,7 +927,7 @@ function emptyAi() {
 }
 
 function fallbackExtract(text, config = { services: [], artists: [] }) {
-  const phone = text.match(/09\d{8}/)?.[0] || '';
+  const phone = extractTaiwanMobile(text);
   const local = extractLocalBookingData(text, config);
   return {
     intent: isRescheduleText(text) ? 'reschedule' : text.includes('取消') ? 'cancel' : 'booking',
@@ -939,6 +950,15 @@ function fallbackExtract(text, config = { services: [], artists: [] }) {
     },
     cancel: { bookingId: text.match(/\d+/)?.[0] || '' },
   };
+}
+
+function isValidTaiwanMobile(phone) {
+  return /^09\d{8}$/.test(String(phone || '').trim());
+}
+
+function extractTaiwanMobile(text) {
+  const match = String(text || '').match(/(?:^|[^\d])(09\d{8})(?!\d)/);
+  return match?.[1] || '';
 }
 
 async function loadConfig() {
@@ -2142,7 +2162,7 @@ function answerAiConfirmation(ai, session, local) {
 
 function shouldSkipAi(text, session, local) {
   if (/^\d+$/.test(text.trim())) return true;
-  if (session.step === 'ask_contact' && /09\d{8}/.test(text)) return true;
+  if (session.step === 'ask_contact' && extractTaiwanMobile(text)) return true;
   if (isConfirmBookingText(text) || isConfirmCancelText(text) || isConfirmRescheduleText(text)) return true;
   if (isCancelBookingRequestText(text) || isAbandonBookingText(text) || isResetText(text)) return true;
   if (isSlotRefinementText(text, session)) return true;
