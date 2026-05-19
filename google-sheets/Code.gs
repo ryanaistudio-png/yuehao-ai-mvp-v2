@@ -87,6 +87,7 @@ function doPost(e) {
     if (payload.action === 'updateBooking') return jsonResponse_({ ok: true, data: updateApiBooking_(ss, payload.userId || '', payload.booking || {}) });
     if (payload.action === 'cancelBooking') return jsonResponse_({ ok: true, data: cancelApiBooking_(ss, payload.userId || '', payload.bookingId || '') });
     if (payload.action === 'getStoreTodayBookings') return jsonResponse_({ ok: true, data: getStoreTodayBookings_(ss) });
+    if (payload.action === 'getStoreBookingsByDate') return jsonResponse_({ ok: true, data: getStoreBookingsByDate_(ss, payload.date || '') });
     if (payload.action === 'getStoreBooking') return jsonResponse_({ ok: true, data: getStoreBooking_(ss, payload.bookingId || '') });
     if (payload.action === 'storeUpdateBooking') return jsonResponse_({ ok: true, data: storeUpdateBooking_(ss, payload.booking || {}) });
     if (payload.action === 'storeCancelBooking') return jsonResponse_({ ok: true, data: storeCancelBooking_(ss, payload.bookingId || '') });
@@ -765,9 +766,14 @@ function getCustomerProfileFromDatabase_(ss, userId) {
 }
 
 function getStoreTodayBookings_(ss) {
-  const today = formatDate_(new Date());
+  return getStoreBookingsByDate_(ss, formatDate_(new Date()));
+}
+
+function getStoreBookingsByDate_(ss, date) {
+  const targetDate = formatMaybeDate_(date);
+  if (!targetDate) throw new Error('請輸入查詢日期');
   return readBookings_(ss)
-    .filter((booking) => booking.date === today && !['已取消', '已完成'].includes(booking.status))
+    .filter((booking) => booking.date === targetDate && !['已取消', '已完成'].includes(booking.status))
     .sort((a, b) => a.startMinutes - b.startMinutes || String(a.artist).localeCompare(String(b.artist)))
     .map(formatApiBooking_);
 }

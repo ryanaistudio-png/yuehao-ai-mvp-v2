@@ -490,20 +490,32 @@ async function handleStaffFlow({ userId, text, session, config }) {
 
   if (text === '今日預約' || text === '1' && session.step === 'staff_menu') {
     session.step = 'staff_menu';
-    return buildStoreTodayBookings(await loadStoreTodayBookings());
+    const date = nowInZone().format('YYYY-MM-DD');
+    return buildStoreDateBookings(await loadStoreBookingsByDate(date), date, '今日預約');
   }
 
   if (text === '2' && session.step === 'staff_menu') {
+    session.step = 'staff_menu';
+    const date = nowInZone().add(1, 'day').format('YYYY-MM-DD');
+    return buildStoreDateBookings(await loadStoreBookingsByDate(date), date, '明日預約');
+  }
+
+  if (text === '3' && session.step === 'staff_menu') {
+    session.step = 'staff_date_lookup';
+    return withStaffHomeAction('請輸入要查詢的日期，例如「查日期 5/20」或「明天」。');
+  }
+
+  if (text === '4' && session.step === 'staff_menu') {
     session.step = 'staff_lookup';
     return withStaffHomeAction('請輸入要查詢的預約編號，例如「查預約 001」。');
   }
 
-  if (text === '3' && session.step === 'staff_menu') {
+  if (text === '5' && session.step === 'staff_menu') {
     session.step = 'staff_reschedule_wait_id';
     return withStaffHomeAction('請輸入要修改的預約編號，例如「修改 001」。');
   }
 
-  if (text === '4' && session.step === 'staff_menu') {
+  if (text === '6' && session.step === 'staff_menu') {
     session.step = 'staff_cancel_wait_id';
     return withStaffHomeAction('請輸入要取消的預約編號，例如「取消 001」。');
   }
@@ -553,6 +565,14 @@ async function handleStaffFlow({ userId, text, session, config }) {
   if (session.step?.startsWith('staff_') && isStaffHomeText(text)) {
     resetStaffSession(session);
     return buildStaffMenu();
+  }
+
+  const dateLookup = parseStaffDateLookup(text, session);
+  if (dateLookup || session.step === 'staff_date_lookup') {
+    const date = dateLookup || parseDateText(text);
+    if (!date) return withStaffHomeAction('請輸入要查詢的日期，例如「查日期 5/20」或「明天」。');
+    session.step = 'staff_menu';
+    return buildStoreDateBookings(await loadStoreBookingsByDate(date), date);
   }
 
   const lookupId = /^查預約/.test(text) ? normalizeShortBookingInput(text) : '';
@@ -630,6 +650,8 @@ function isStaffCommandText(text, session) {
   return text === '店家'
     || text === '店家模式'
     || text === '今日預約'
+    || text === '明日預約'
+    || /^查日期/.test(text)
     || /^查預約\s*\d+/.test(text)
     || /^修改\s*(預約\s*)?\d+/.test(text)
     || /^取消\s*(預約\s*)?\d+/.test(text);
@@ -662,18 +684,35 @@ function buildStaffMenu() {
   return [
     '店家模式',
     '1. 今日預約',
-    '2. 查預約',
-    '3. 修改預約',
-    '4. 取消預約',
+    '2. 明日預約',
+    '3. 查日期',
+    '4. 查預約',
+    '5. 修改預約',
+    '6. 取消預約',
   ].join('\n');
 }
 
 function buildStoreTodayBookings(bookings) {
-  if (!bookings.length) return withStaffHomeAction('今天目前沒有預約。');
+  const date = nowInZone().format('YYYY-MM-DD');
+  return buildStoreDateBookings(bookings, date, '今日預約');
+}
+
+function buildStoreDateBookings(bookings, date, title = '') {
+  const heading = title || `${formatDateWithWeekday(date)} 預約`;
+  if (!bookings.length) return withStaffHomeAction(`${heading}：目前沒有預約。`);
   return withStaffHomeAction([
-    '今日預約：',
+    `${heading}：`,
     ...bookings.map((booking) => `${shortBookingId(booking.id)}｜${booking.start}｜${booking.artist}｜${booking.service}｜${booking.customer}｜${booking.phone}`),
   ].join('\n'));
+}
+
+function parseStaffDateLookup(text, session) {
+  const value = String(text || '').trim();
+  if (value === '明日預約') return nowInZone().add(1, 'day').format('YYYY-MM-DD');
+  if (value === '今日預約') return nowInZone().format('YYYY-MM-DD');
+  if (/^查日期/.test(value)) return parseDateText(value.replace(/^查日期/, '').trim());
+  if (session.step === 'staff_date_lookup') return parseDateText(value);
+  return '';
 }
 
 function withStaffHomeAction(message) {
@@ -1083,6 +1122,10 @@ async function rescheduleBooking(userId, booking) {
 
 async function loadStoreTodayBookings() {
   return appsScriptRequest('getStoreTodayBookings');
+}
+
+async function loadStoreBookingsByDate(date) {
+  return appsScriptRequest('getStoreBookingsByDate', { date });
 }
 
 async function loadStoreBooking(bookingId) {
