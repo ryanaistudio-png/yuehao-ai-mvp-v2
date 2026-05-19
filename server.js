@@ -1026,6 +1026,8 @@ function continueContactStep({ text, session, config }) {
   }
 
   if (!session.booking.customerName || !session.booking.phone) {
+    if (session.booking.phone) return '已收到手機，請再留下姓名，例如：王小美。';
+    if (session.booking.customerName) return '已收到姓名，請再留下 09 開頭的 10 碼手機號碼，例如：0912345678。';
     return '最後請留下姓名與手機，例如：王小美 0912345678。';
   }
 
