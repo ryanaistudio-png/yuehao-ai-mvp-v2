@@ -199,6 +199,10 @@ async function runConversation({ userId, profile, text, ai, session, config, loc
   const local = providedLocal || extractLocalBookingData(text, config);
   adjustAmbiguousTimeWithContext(local.booking, text, session.booking, config.settings);
   adjustAmbiguousTimeWithContext(ai.booking, text, session.booking, config.settings);
+  if (session.step === 'ask_contact') {
+    mergeBookingData(session.booking, ai.booking);
+    return continueContactStep({ text, session, config });
+  }
   const businessDateAnswer = answerBusinessDateQuery(text, config);
   if (businessDateAnswer) return businessDateAnswer;
   const artistStatusAnswer = answerArtistStatusQuery(text, config, local);
@@ -324,11 +328,6 @@ async function runConversation({ userId, profile, text, ai, session, config, loc
 
   if (!session.booking.customerName || !session.booking.phone) {
     await hydrateKnownCustomer(session, userId);
-  }
-
-  if (session.step === 'ask_contact' && /\d/.test(text) && !extractTaiwanMobile(text)) {
-    session.booking.phone = '';
-    return '手機號碼格式不正確，請留下 09 開頭的 10 碼手機號碼，例如：王小美 0912345678。';
   }
 
   if (!session.booking.customerName || !session.booking.phone) {
@@ -1011,6 +1010,42 @@ function fallbackExtract(text, config = { services: [], artists: [] }) {
     },
     cancel: { bookingId: text.match(/\d+/)?.[0] || '' },
   };
+}
+
+function continueContactStep({ text, session, config }) {
+  const phone = extractTaiwanMobile(text);
+  if (phone) {
+    session.booking.phone = phone;
+    const name = String(text || '').replace(phone, '').replace(/[，,。.\s]+/g, '').trim();
+    if (name) session.booking.customerName = name;
+  } else if (/\d/.test(text)) {
+    session.booking.phone = '';
+    return '手機號碼格式不正確，請留下 09 開頭的 10 碼手機號碼，例如：王小美 0912345678。';
+  } else if (!session.booking.customerName) {
+    session.booking.customerName = String(text || '').trim();
+  }
+
+  if (!session.booking.customerName || !session.booking.phone) {
+    return '最後請留下姓名與手機，例如：王小美 0912345678。';
+  }
+
+  if (!isValidTaiwanMobile(session.booking.phone)) {
+    session.booking.phone = '';
+    return '手機號碼格式不正確，請留下 09 開頭的 10 碼手機號碼，例如：王小美 0912345678。';
+  }
+
+  const service = findService(config.services, session.booking.service) || { name: session.booking.service, duration: session.booking.duration || '' };
+  session.step = 'confirm_booking';
+  return [
+    '請確認預約資訊：',
+    `服務：${service.name}${service.duration ? `（約 ${service.duration} 分鐘）` : ''}`,
+    `美甲師：${session.booking.artist}`,
+    `時間：${session.booking.date} ${session.booking.time}`,
+    `姓名：${session.booking.customerName}`,
+    `電話：${session.booking.phone}`,
+    '1. 確認預約',
+    '2. 取消',
+  ].join('\n');
 }
 
 function isValidTaiwanMobile(phone) {
@@ -2227,7 +2262,7 @@ function answerAiConfirmation(ai, session, local) {
 
 function shouldSkipAi(text, session, local) {
   if (/^\d+$/.test(text.trim())) return true;
-  if (session.step === 'ask_contact' && extractTaiwanMobile(text)) return true;
+  if (session.step === 'ask_contact') return true;
   if (isConfirmBookingText(text) || isConfirmCancelText(text) || isConfirmRescheduleText(text)) return true;
   if (isCancelBookingRequestText(text) || isAbandonBookingText(text) || isResetText(text)) return true;
   if (isSlotRefinementText(text, session)) return true;
