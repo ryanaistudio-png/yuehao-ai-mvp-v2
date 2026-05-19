@@ -54,8 +54,12 @@ async function handleEvent(event) {
 
   const userId = event.source.userId || event.source.groupId || event.source.roomId || 'unknown';
   if (event.message.type !== 'text') {
-    const existingSession = sessions.get(userId);
-    await safeReplyText(event, userId, buildNonTextMessage(existingSession));
+    try {
+      const existingSession = sessions.get(userId);
+      await safeReplyText(event, userId, buildNonTextMessage(existingSession));
+    } catch (error) {
+      console.error('non-text reply failed:', formatErrorForLog(error));
+    }
     return;
   }
 
@@ -353,16 +357,16 @@ async function runConversation({ userId, profile, text, ai, session, config, loc
         `服務：${service.name}`,
         `美甲師：${session.booking.artist}`,
         '',
-        '最後請留下姓名與手機，例如：王小美 0912345678。',
+        contactPrompt(),
       ].join('\n');
     }
-    return '最後請留下姓名與手機，例如：王小美 0912345678。';
+    return contactPrompt();
   }
 
   if (!isValidTaiwanMobile(session.booking.phone)) {
     session.booking.phone = '';
     session.step = 'ask_contact';
-    return '手機號碼格式不正確，請留下 09 開頭的 10 碼手機號碼，例如：王小美 0912345678。';
+    return contactPrompt('手機號碼格式不正確，請留下 09 開頭的 10 碼手機號碼，例如：王小美 0912345678。');
   }
 
   if (session.step !== 'confirm_booking') {
@@ -1028,6 +1032,10 @@ function fallbackExtract(text, config = { services: [], artists: [] }) {
 }
 
 function continueContactStep({ text, session, config }) {
+  if (isContactControlText(text)) {
+    return contactPrompt();
+  }
+
   const phone = extractTaiwanMobile(text);
   if (phone) {
     session.booking.phone = phone;
@@ -1035,23 +1043,23 @@ function continueContactStep({ text, session, config }) {
     if (name) session.booking.customerName = name;
   } else if (/\d/.test(text)) {
     if (isLikelyOptionOrTimeInput(text)) {
-      return '最後請留下姓名與手機，例如：王小美 0912345678。';
+      return contactPrompt();
     }
     session.booking.phone = '';
-    return '手機號碼格式不正確，請留下 09 開頭的 10 碼手機號碼，例如：王小美 0912345678。';
+    return contactPrompt('手機號碼格式不正確，請留下 09 開頭的 10 碼手機號碼，例如：王小美 0912345678。');
   } else if (!session.booking.customerName) {
     session.booking.customerName = String(text || '').trim();
   }
 
   if (!session.booking.customerName || !session.booking.phone) {
-    if (session.booking.phone) return '已收到手機，請再留下姓名，例如：王小美。';
-    if (session.booking.customerName) return '已收到姓名，請再留下 09 開頭的 10 碼手機號碼，例如：0912345678。';
-    return '最後請留下姓名與手機，例如：王小美 0912345678。';
+    if (session.booking.phone) return contactPrompt('已收到手機，請再留下姓名，例如：王小美。');
+    if (session.booking.customerName) return contactPrompt('已收到姓名，請再留下 09 開頭的 10 碼手機號碼，例如：0912345678。');
+    return contactPrompt();
   }
 
   if (!isValidTaiwanMobile(session.booking.phone)) {
     session.booking.phone = '';
-    return '手機號碼格式不正確，請留下 09 開頭的 10 碼手機號碼，例如：王小美 0912345678。';
+    return contactPrompt('手機號碼格式不正確，請留下 09 開頭的 10 碼手機號碼，例如：王小美 0912345678。');
   }
 
   const service = findService(config.services, session.booking.service) || { name: session.booking.service, duration: session.booking.duration || '' };
@@ -1066,6 +1074,25 @@ function continueContactStep({ text, session, config }) {
     '1. 確認預約',
     '2. 取消',
   ].join('\n');
+}
+
+function contactPrompt(message = '最後請留下姓名與手機，例如：王小美 0912345678。') {
+  return [
+    message,
+    restartOptionLine(),
+  ].join('\n');
+}
+
+function isContactControlText(text) {
+  const value = String(text || '').trim();
+  return isStartBookingText(value)
+    || isGreetingText(value)
+    || value === '預約'
+    || value === '我要預約'
+    || value === '店家'
+    || value === '店家模式'
+    || value === '回首頁'
+    || value === '重新開始';
 }
 
 function isValidTaiwanMobile(phone) {
@@ -1170,13 +1197,27 @@ async function hydrateKnownCustomer(session, userId) {
   session.customerProfileLoaded = true;
   if (isStaffUser(userId)) return;
   try {
-    const customer = await loadCustomerProfile(userId);
+    const cached = getRememberedCustomerProfile(userId);
+    if (cached) {
+      if (!session.booking.customerName && cached.customerName) session.booking.customerName = cached.customerName;
+      if (!session.booking.phone && cached.phone) session.booking.phone = cached.phone;
+      return;
+    }
+    const timeoutMs = Number(process.env.CUSTOMER_PROFILE_LOOKUP_TIMEOUT_MS || 1500);
+    const customer = await withTimeout(loadCustomerProfile(userId), timeoutMs, null);
     if (!customer) return;
     if (!session.booking.customerName && customer.customerName) session.booking.customerName = customer.customerName;
     if (!session.booking.phone && customer.phone) session.booking.phone = customer.phone;
   } catch (error) {
     console.error('loadCustomerProfile failed:', error.response?.data || error.message);
   }
+}
+
+function withTimeout(promise, ms, fallback = null) {
+  return Promise.race([
+    promise,
+    new Promise((resolve) => setTimeout(() => resolve(fallback), ms)),
+  ]);
 }
 
 function rememberCustomerProfile(userId, profile = {}) {
@@ -2293,7 +2334,7 @@ function compareSlots(a, b) {
 
 function findService(services, input) {
   if (!input) return null;
-  return services.find((service) => service.name === input || service.name.includes(input) || input.includes(service.name));
+  return (services || []).find((service) => service.name === input || service.name.includes(input) || input.includes(service.name));
 }
 
 function artistsForService(artists, service) {
