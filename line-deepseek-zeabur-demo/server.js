@@ -35,6 +35,7 @@ const lineClient = new line.messagingApi.MessagingApiClient({
 });
 
 const sessions = new Map();
+const customerProfileCache = new Map();
 const cache = { expiresAt: 0, data: null };
 const ANY_ARTIST = '不指定';
 
@@ -49,9 +50,15 @@ app.post('/line/webhook', line.middleware(lineConfig), async (req, res) => {
 });
 
 async function handleEvent(event) {
-  if (event.type !== 'message' || event.message.type !== 'text') return;
+  if (event.type !== 'message') return;
 
   const userId = event.source.userId || event.source.groupId || event.source.roomId || 'unknown';
+  if (event.message.type !== 'text') {
+    const existingSession = sessions.get(userId);
+    await safeReplyText(event, userId, buildNonTextMessage(existingSession));
+    return;
+  }
+
   const text = event.message.text.trim();
   let config = null;
   try {
@@ -1132,6 +1139,12 @@ async function createBooking({ userId, lineDisplayName, booking, service }) {
   if (!result?.bookingId) {
     throw new Error(`Apps Script did not return bookingId for createBooking: ${safeJson(result)}`);
   }
+  rememberCustomerProfile(userId, {
+    customerName: booking.customerName,
+    phone: booking.phone,
+    lineUserId: userId,
+    lineDisplayName: lineDisplayName || '',
+  });
   cache.expiresAt = 0;
   return result;
 }
@@ -1145,7 +1158,11 @@ async function loadUserActiveBookings(userId) {
 
 async function loadCustomerProfile(userId) {
   if (!userId || !userId.startsWith('U')) return null;
-  return appsScriptRequest('getCustomerProfile', { userId });
+  const cached = getRememberedCustomerProfile(userId);
+  if (cached) return cached;
+  const profile = await appsScriptRequest('getCustomerProfile', { userId });
+  if (profile?.customerName || profile?.phone) rememberCustomerProfile(userId, profile);
+  return profile;
 }
 
 async function hydrateKnownCustomer(session, userId) {
@@ -1160,6 +1177,26 @@ async function hydrateKnownCustomer(session, userId) {
   } catch (error) {
     console.error('loadCustomerProfile failed:', error.response?.data || error.message);
   }
+}
+
+function rememberCustomerProfile(userId, profile = {}) {
+  if (!userId || !userId.startsWith('U')) return;
+  if (!profile.customerName && !profile.phone) return;
+  customerProfileCache.set(userId, {
+    ...profile,
+    cachedAt: Date.now(),
+  });
+}
+
+function getRememberedCustomerProfile(userId) {
+  const profile = customerProfileCache.get(userId);
+  if (!profile) return null;
+  const ttl = Number(process.env.CUSTOMER_PROFILE_CACHE_MINUTES || 1440) * 60 * 1000;
+  if (Date.now() - profile.cachedAt > ttl) {
+    customerProfileCache.delete(userId);
+    return null;
+  }
+  return profile;
 }
 
 async function cancelBooking(userId, bookingId) {
@@ -1269,6 +1306,32 @@ function buildRestartMessage() {
     '請問您想預約，還是要改時間呢？',
     '1. 📅 我要預約',
     '2. ✏️ 改時間',
+  ].join('\n');
+}
+
+function buildNonTextMessage(session) {
+  if (session?.step === 'ask_contact') {
+    return [
+      '我目前只能讀文字訊息，請留下姓名與 09 開頭的 10 碼手機號碼。',
+      '例如：王小美 0912345678',
+      restartOptionLine(),
+    ].join('\n');
+  }
+  if (session?.step?.startsWith('staff_')) {
+    return [
+      '我目前只能讀文字訊息，請直接輸入店家指令或點選按鈕。',
+      '0. 店家模式',
+    ].join('\n');
+  }
+  if (isActiveBookingSession(session) || session?.step?.startsWith('cancel') || session?.step?.startsWith('reschedule')) {
+    return [
+      '我目前只能讀文字訊息，請直接輸入文字或點選下方按鈕。',
+      restartOptionLine(),
+    ].join('\n');
+  }
+  return [
+    '我目前只能用文字協助預約。',
+    buildRestartMessage(),
   ].join('\n');
 }
 
