@@ -89,6 +89,10 @@ function doPost(e) {
     if (payload.action === 'getStoreTodayBookings') return jsonResponse_({ ok: true, data: getStoreTodayBookings_(ss) });
     if (payload.action === 'getStoreBookingsByDate') return jsonResponse_({ ok: true, data: getStoreBookingsByDate_(ss, payload.date || '') });
     if (payload.action === 'getStoreBooking') return jsonResponse_({ ok: true, data: getStoreBooking_(ss, payload.bookingId || '') });
+    if (payload.action === 'getStoreBookingCandidates') return jsonResponse_({ ok: true, data: getStoreBookingCandidates_(ss, payload.bookingId || '') });
+    if (payload.action === 'searchStoreCustomerBookings') return jsonResponse_({ ok: true, data: searchStoreCustomerBookings_(ss, payload.query || '') });
+    if (payload.action === 'storeCreateBooking') return jsonResponse_({ ok: true, data: storeCreateBooking_(ss, payload.booking || {}) });
+    if (payload.action === 'storeExtendBooking') return jsonResponse_({ ok: true, data: storeExtendBooking_(ss, payload.bookingId || '', payload.extraMinutes || 0) });
     if (payload.action === 'storeUpdateBooking') return jsonResponse_({ ok: true, data: storeUpdateBooking_(ss, payload.booking || {}) });
     if (payload.action === 'storeCancelBooking') return jsonResponse_({ ok: true, data: storeCancelBooking_(ss, payload.bookingId || '') });
 
@@ -783,6 +787,26 @@ function getStoreBooking_(ss, bookingId) {
   return formatApiBooking_(parseBookingRow_(found.values));
 }
 
+function getStoreBookingCandidates_(ss, bookingId) {
+  return findBookingRowMatches_(ss, bookingId, '')
+    .map((match) => formatApiBooking_(parseBookingRow_(match.values)));
+}
+
+function searchStoreCustomerBookings_(ss, query) {
+  const keyword = String(query || '').trim();
+  if (!keyword) throw new Error('請輸入客人姓名或手機。');
+  const phone = keyword.match(/09\d{8}/)?.[0] || '';
+  const normalized = keyword.replace(/\s+/g, '');
+  return readBookings_(ss)
+    .filter((booking) => {
+      if (phone && String(booking.phone || '').includes(phone)) return true;
+      return String(booking.customer || '').replace(/\s+/g, '').includes(normalized);
+    })
+    .sort((a, b) => String(b.date).localeCompare(String(a.date)) || b.startMinutes - a.startMinutes)
+    .slice(0, 12)
+    .map(formatApiBooking_);
+}
+
 function formatApiBooking_(booking) {
   return {
     id: booking.id,
@@ -798,6 +822,15 @@ function formatApiBooking_(booking) {
     lineUserId: booking.lineUserId,
     lineDisplayName: booking.lineDisplayName,
   };
+}
+
+function storeCreateBooking_(ss, booking) {
+  if (!booking.customerName || !booking.phone) throw new Error('新增預約需要客人姓名與手機。');
+  const payload = Object.assign({}, booking, {
+    lineUserId: booking.lineUserId || '',
+    lineDisplayName: booking.lineDisplayName || '',
+  });
+  return createApiBooking_(ss, payload);
 }
 
 function updateApiBooking_(ss, userId, booking) {
@@ -873,6 +906,35 @@ function storeUpdateBooking_(ss, booking) {
     time: minutesToTime_(start),
     end: minutesToTime_(end),
     duration: service.duration,
+  };
+}
+
+function storeExtendBooking_(ss, bookingId, extraMinutes) {
+  const minutes = Number(extraMinutes || 0);
+  if (!minutes || minutes < 0) throw new Error('請輸入要延長的分鐘數。');
+  const found = resolveBookingRow_(ss, bookingId);
+  const old = parseBookingRow_(found.values);
+  if (['已取消', '已完成'].includes(old.status)) throw new Error('這筆預約目前不可延時');
+  const newEnd = old.endMinutes + minutes;
+  assertNoConflict_(ss, old.id, old.artist, old.date, old.startMinutes, newEnd);
+  const warnings = getExceptionWarnings_(ss, old.artist, old.date, old.startMinutes, newEnd);
+  assertSpecialAllowed_(warnings, '否');
+  const sheet = ss.getSheetByName(SHEETS.bookings);
+  sheet.getRange(found.rowNumber, 13).setValue(minutesToTime_(newEnd));
+  sheet.getRange(found.rowNumber, 14).setValue(newEnd - old.startMinutes);
+  sheet.getRange(found.rowNumber, 15).setValue(buildNote_(old.note, warnings));
+  sheet.getRange(found.rowNumber, 19).setValue(new Date());
+  refreshApiBookingData_(ss);
+  return {
+    bookingId: old.id,
+    customerName: old.customer,
+    phone: old.phone,
+    service: old.service,
+    artist: old.artist,
+    date: old.date,
+    time: old.startTime,
+    end: minutesToTime_(newEnd),
+    duration: newEnd - old.startMinutes,
   };
 }
 
@@ -1127,13 +1189,7 @@ function findBookingAt_(bookings, artist, dateText, minutes) {
 function resolveBookingRow_(ss, id, userId) {
   const input = String(id || '').trim();
   if (!input) throw new Error('請輸入預約編號。');
-  const rows = ss.getSheetByName(SHEETS.bookings).getRange('A3:T5000').getValues();
-  const matches = [];
-  rows.forEach((row, index) => {
-    if (!row[0]) return;
-    if (userId && row[6] !== userId) return;
-    if (bookingIdMatches_(row[0], input)) matches.push({ rowNumber: index + 3, values: row });
-  });
+  const matches = findBookingRowMatches_(ss, input, userId);
   if (!matches.length) throw new Error(`找不到預約編號 ${input}`);
   if (matches.length > 1) {
     const options = matches.map((match) => {
@@ -1143,6 +1199,19 @@ function resolveBookingRow_(ss, id, userId) {
     throw new Error(`找到多筆短編號 ${input}，請輸入完整預約編號：\n${options}`);
   }
   return matches[0];
+}
+
+function findBookingRowMatches_(ss, id, userId) {
+  const input = String(id || '').trim();
+  if (!input) return [];
+  const rows = ss.getSheetByName(SHEETS.bookings).getRange('A3:T5000').getValues();
+  const matches = [];
+  rows.forEach((row, index) => {
+    if (!row[0]) return;
+    if (userId && row[6] !== userId) return;
+    if (bookingIdMatches_(row[0], input)) matches.push({ rowNumber: index + 3, values: row });
+  });
+  return matches;
 }
 
 function assertNoConflict_(ss, ignoreId, artist, dateValue, start, end) {

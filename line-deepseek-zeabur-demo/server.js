@@ -537,6 +537,28 @@ async function handleStaffFlow({ userId, text, session, config }) {
     return withStaffHomeAction('請輸入要取消的預約編號，例如「取消 001」。');
   }
 
+  if (text === '7' && session.step === 'staff_menu') {
+    session.step = 'staff_customer_lookup';
+    return withStaffHomeAction('請輸入客人姓名或手機，例如「查客人 0912345678」或「查客人 王小美」。');
+  }
+
+  if (text === '8' && session.step === 'staff_menu') {
+    session.step = 'staff_availability_change';
+    session.staffAvailability = {};
+    return withStaffHomeAction('請輸入日期、服務與時段，例如「查空檔 5/21 單色 下午」。');
+  }
+
+  if (text === '9' && session.step === 'staff_menu') {
+    session.step = 'staff_add_change';
+    session.staffAddBooking = {};
+    return withStaffHomeAction('請輸入新增預約資料，例如「新增預約 5/21 16:00 單色 Amy 王小美 0912345678」。');
+  }
+
+  if (text === '10' && session.step === 'staff_menu') {
+    session.step = 'staff_extend_wait_id';
+    return withStaffHomeAction('請輸入要延時的預約編號與分鐘，例如「延時 001 30」。');
+  }
+
   if (session.step === 'staff_cancel_confirm' && isConfirmCancelText(text)) {
     const booking = session.staffCancelBooking;
     if (!booking) {
@@ -584,6 +606,14 @@ async function handleStaffFlow({ userId, text, session, config }) {
     return buildStaffMenu();
   }
 
+  const selectedBooking = pickStaffBookingOption(text, session);
+  if (selectedBooking) {
+    if (session.staffPendingAction === 'lookup') return finishStaffLookup(session, selectedBooking);
+    if (session.staffPendingAction === 'cancel') return beginStaffCancel(session, selectedBooking);
+    if (session.staffPendingAction === 'reschedule') return beginStaffReschedule(session, selectedBooking);
+    if (session.staffPendingAction === 'extend') return beginStaffExtend(session, selectedBooking);
+  }
+
   const dateLookup = parseStaffDateLookup(text, session);
   if (dateLookup || session.step === 'staff_date_lookup') {
     const date = dateLookup || parseDateText(text);
@@ -596,47 +626,71 @@ async function handleStaffFlow({ userId, text, session, config }) {
   if (lookupId || session.step === 'staff_lookup') {
     const bookingId = lookupId || normalizeShortBookingInput(text);
     if (!bookingId) return withStaffHomeAction('請輸入要查詢的預約編號，例如「查預約 001」。');
-    session.step = 'staff_menu';
-    const booking = await tryLoadStoreBooking(bookingId);
+    const booking = await tryLoadStoreBooking(bookingId, session, 'lookup');
     if (!booking.ok) return withStaffHomeAction(booking.message);
-    return withStaffHomeAction(formatStoreBooking(booking.data));
+    return finishStaffLookup(session, booking.data);
+  }
+
+  const customerQuery = /^查客人/.test(text) ? text.replace(/^查客人/, '').trim() : '';
+  if (customerQuery || session.step === 'staff_customer_lookup') {
+    const query = customerQuery || text.trim();
+    if (!query) return withStaffHomeAction('請輸入客人姓名或手機，例如「查客人 0912345678」。');
+    session.step = 'staff_customer_lookup';
+    return formatStoreCustomerBookings(await searchStoreCustomerBookings(query), query);
+  }
+
+  if (/^查空檔/.test(text) || session.step === 'staff_availability_change') {
+    return handleStaffAvailability({ text: text.replace(/^查空檔/, '').trim(), session, config });
+  }
+
+  if (/^新增預約/.test(text) || session.step === 'staff_add_change' || session.step === 'staff_add_confirm') {
+    return handleStaffAddBooking({ text: text.replace(/^新增預約/, '').trim(), session, config });
+  }
+
+  if (session.step === 'staff_extend_confirm' && isConfirmRescheduleText(text)) {
+    const booking = session.staffExtendBooking;
+    const minutes = session.staffExtendMinutes;
+    if (!booking || !minutes) return withStaffHomeAction('延時資訊已過期，請重新輸入「延時 001 30」。');
+    try {
+      const result = await storeExtendBooking(booking.id, minutes);
+      resetStaffSession(session);
+      return withStaffHomeAction([
+        `已延長預約 ${shortBookingId(result.bookingId)}號。`,
+        `時間：${result.date} ${result.time}-${result.end}`,
+        `美甲師：${result.artist}`,
+      ].join('\n'));
+    } catch (error) {
+      session.step = 'staff_extend_minutes';
+      return withStaffHomeAction(`延時失敗：${error.message}\n請改輸入其他分鐘數，或輸入 0 回店家模式。`);
+    }
+  }
+
+  if (session.step === 'staff_extend_confirm' && isAbortRescheduleText(text)) {
+    resetStaffSession(session);
+    return buildStaffMenu();
+  }
+
+  const extendId = /^延時\s*\d+|^延時\s*預約\s*\d+/.test(text) ? normalizeShortBookingInput(text) : '';
+  if (extendId || session.step === 'staff_extend_wait_id' || session.step === 'staff_extend_minutes') {
+    return handleStaffExtend({ text, session });
   }
 
   const cancelId = /^取消\s*\d+|^取消\s*預約\s*\d+/.test(text) ? normalizeShortBookingInput(text) : '';
   if (cancelId || session.step === 'staff_cancel_wait_id') {
     const bookingId = cancelId || normalizeShortBookingInput(text);
     if (!bookingId) return withStaffHomeAction('請輸入要取消的預約編號，例如「取消 001」。');
-    const loaded = await tryLoadStoreBooking(bookingId);
+    const loaded = await tryLoadStoreBooking(bookingId, session, 'cancel');
     if (!loaded.ok) return withStaffHomeAction(loaded.message);
-    const booking = loaded.data;
-    session.step = 'staff_cancel_confirm';
-    session.staffCancelBooking = booking;
-    return [
-      '請確認是否取消這筆預約：',
-      formatStoreBooking(booking),
-      '',
-      '1. 確認刪除',
-      '2. 取消刪除',
-      '0. 店家模式',
-    ].join('\n');
+    return beginStaffCancel(session, loaded.data);
   }
 
   const modifyId = /^修改\s*\d+|^修改\s*預約\s*\d+/.test(text) ? normalizeShortBookingInput(text) : '';
   if (modifyId || session.step === 'staff_reschedule_wait_id') {
     const bookingId = modifyId || normalizeShortBookingInput(text);
     if (!bookingId) return withStaffHomeAction('請輸入要修改的預約編號，例如「修改 001」。');
-    const loaded = await tryLoadStoreBooking(bookingId);
+    const loaded = await tryLoadStoreBooking(bookingId, session, 'reschedule');
     if (!loaded.ok) return withStaffHomeAction(loaded.message);
-    const booking = loaded.data;
-    session.step = 'staff_reschedule_change';
-    session.staffBooking = booking;
-    session.staffChange = {};
-    return withStaffHomeAction([
-      '我找到這筆預約：',
-      formatStoreBooking(booking),
-      '',
-      '請輸入新的日期與時間，例如「5/20 下午 4 點」。',
-    ].join('\n'));
+    return beginStaffReschedule(session, loaded.data);
   }
 
   if (session.step === 'staff_reschedule_change') {
@@ -646,8 +700,18 @@ async function handleStaffFlow({ userId, text, session, config }) {
   return '';
 }
 
-async function tryLoadStoreBooking(bookingId) {
+async function tryLoadStoreBooking(bookingId, session = null, pendingAction = '') {
   try {
+    const candidates = await loadStoreBookingCandidates(bookingId);
+    if (Array.isArray(candidates) && candidates.length > 1) {
+      if (session) {
+        session.step = 'staff_select_booking';
+        session.staffBookingOptions = candidates;
+        session.staffPendingAction = pendingAction;
+      }
+      return { ok: false, message: buildBookingCandidateOptions(candidates, bookingId) };
+    }
+    if (Array.isArray(candidates) && candidates.length === 1) return { ok: true, data: candidates[0] };
     return { ok: true, data: await loadStoreBooking(bookingId) };
   } catch (error) {
     if (isExpectedBookingLookupError(error)) {
@@ -655,6 +719,67 @@ async function tryLoadStoreBooking(bookingId) {
     }
     throw error;
   }
+}
+
+function buildBookingCandidateOptions(bookings, input) {
+  return withStaffHomeAction([
+    `短編號 ${normalizeShortBookingInput(input)} 找到多筆預約，請選擇：`,
+    ...bookings.map((booking, index) => `${index + 1}. ${booking.id}｜${booking.date} ${booking.start}｜${booking.artist}｜${booking.service}｜${booking.customer}`),
+  ].join('\n'));
+}
+
+function pickStaffBookingOption(text, session) {
+  if (session.step !== 'staff_select_booking') return null;
+  if (!/^\d+$/.test(String(text || '').trim())) return null;
+  const booking = session.staffBookingOptions?.[Number(text.trim()) - 1] || null;
+  if (!booking) return null;
+  session.staffBookingOptions = null;
+  return booking;
+}
+
+function finishStaffLookup(session, booking) {
+  session.step = 'staff_menu';
+  session.staffPendingAction = null;
+  return withStaffHomeAction(formatStoreBooking(booking));
+}
+
+function beginStaffCancel(session, booking) {
+  session.step = 'staff_cancel_confirm';
+  session.staffPendingAction = null;
+  session.staffCancelBooking = booking;
+  return [
+    '請確認是否取消這筆預約：',
+    formatStoreBooking(booking),
+    '',
+    '1. 確認刪除',
+    '2. 取消刪除',
+    '0. 店家模式',
+  ].join('\n');
+}
+
+function beginStaffReschedule(session, booking) {
+  session.step = 'staff_reschedule_change';
+  session.staffPendingAction = null;
+  session.staffBooking = booking;
+  session.staffChange = {};
+  return withStaffHomeAction([
+    '我找到這筆預約：',
+    formatStoreBooking(booking),
+    '',
+    '請輸入新的日期與時間，例如「5/20 下午 4 點」。',
+  ].join('\n'));
+}
+
+function beginStaffExtend(session, booking) {
+  session.step = 'staff_extend_minutes';
+  session.staffPendingAction = null;
+  session.staffExtendBooking = booking;
+  return withStaffHomeAction([
+    '我找到這筆預約：',
+    formatStoreBooking(booking),
+    '',
+    '請輸入要延長幾分鐘，例如「30」。',
+  ].join('\n'));
 }
 
 function isExpectedBookingLookupError(error) {
@@ -668,9 +793,17 @@ function isStaffCommandText(text, session) {
     || text === '店家模式'
     || text === '今日預約'
     || text === '明日預約'
+    || text === '查客人'
+    || text === '查空檔'
+    || text === '新增預約'
+    || text === '延時'
     || Boolean(parseDateText(text))
     || /^查日期/.test(text)
     || /^查預約\s*\d+/.test(text)
+    || /^查客人\s+/.test(text)
+    || /^查空檔/.test(text)
+    || /^新增預約/.test(text)
+    || /^延時\s*(預約\s*)?\d*/.test(text)
     || /^修改\s*(預約\s*)?\d+/.test(text)
     || /^取消\s*(預約\s*)?\d+/.test(text);
 }
@@ -682,6 +815,11 @@ function resetStaffSession(session) {
   session.staffCancelBooking = null;
   session.staffRescheduleDraft = null;
   session.staffSlotOptions = null;
+  session.staffBookingOptions = null;
+  session.staffPendingAction = null;
+  session.staffAddBooking = null;
+  session.staffExtendBooking = null;
+  session.staffExtendMinutes = null;
 }
 
 function isStaffHomeText(text) {
@@ -707,6 +845,10 @@ function buildStaffMenu() {
     '4. 查預約',
     '5. 修改預約',
     '6. 取消預約',
+    '7. 查客人',
+    '8. 查空檔',
+    '9. 新增預約',
+    '10. 延時',
   ].join('\n');
 }
 
@@ -830,6 +972,209 @@ function buildStaffRescheduleSlotOptions({ config, session, booking, next, chang
     suggestions.length ? '可改約以下時段：' : '請換日期、時段或美甲師。',
     ...suggestions.map((slot, index) => `${index + 1}. ${slot.date} ${slot.time}｜${slot.artist}`),
   ].join('\n'));
+}
+
+function formatStoreCustomerBookings(bookings, query) {
+  if (!bookings.length) return withStaffHomeAction(`查不到「${query}」的預約紀錄。`);
+  return withStaffHomeAction([
+    `「${query}」相關預約：`,
+    ...bookings.map((booking) => `${shortBookingId(booking.id)}｜${booking.status}｜${booking.date} ${booking.start}｜${booking.artist}｜${booking.service}｜${booking.customer}｜${booking.phone}`),
+  ].join('\n'));
+}
+
+function handleStaffAvailability({ text, session, config }) {
+  const local = extractLocalBookingData(text, config);
+  session.staffAvailability = session.staffAvailability || {};
+  mergeBookingData(session.staffAvailability, local.booking);
+  const query = session.staffAvailability;
+  const service = findService(config.services, query.service);
+  if (!query.date || !service) {
+    session.step = 'staff_availability_change';
+    return withStaffHomeAction([
+      '請輸入查空檔條件，至少要有日期與服務。',
+      '例如：查空檔 5/21 單色 下午',
+    ].join('\n'));
+  }
+  const slots = findAvailableStartSlots(config.slots, {
+    artist: query.artist || ANY_ARTIST,
+    date: query.date,
+    period: query.period || '',
+  }, service, config.settings);
+  const grouped = groupStaffAvailabilitySlots(slots).slice(0, 12);
+  session.step = 'staff_availability_change';
+  if (!grouped.length) {
+    return withStaffHomeAction(`${formatDateWithWeekday(query.date)} 目前沒有可完成「${service.name}」的空檔。`);
+  }
+  return withStaffHomeAction([
+    `${formatDateWithWeekday(query.date)}「${service.name}」可約空檔：`,
+    ...grouped.map((item, index) => `${index + 1}. ${item.time}｜${item.artists.join('、')}`),
+  ].join('\n'));
+}
+
+function groupStaffAvailabilitySlots(slots = []) {
+  const byTime = new Map();
+  slots.sort(compareSlots).forEach((slot) => {
+    if (!byTime.has(slot.time)) byTime.set(slot.time, { time: slot.time, artists: [] });
+    byTime.get(slot.time).artists.push(slot.artist);
+  });
+  return [...byTime.values()];
+}
+
+async function handleStaffAddBooking({ text, session, config }) {
+  if (session.step === 'staff_add_confirm' && isConfirmRescheduleText(text)) {
+    const draft = session.staffAddBooking;
+    if (!draft) return withStaffHomeAction('新增資料已過期，請重新輸入「新增預約」。');
+    const service = findService(config.services, draft.service);
+    try {
+      const result = await storeCreateBooking(draft);
+      resetStaffSession(session);
+      return withStaffHomeAction([
+        '已新增預約！',
+        `預約編號：${shortBookingId(result.bookingId)}號`,
+        `客人：${result.customerName}`,
+        `電話：${result.phone}`,
+        `服務：${service?.name || result.service}`,
+        `美甲師：${result.artist}`,
+        `時間：${result.date} ${result.time}-${result.end}`,
+      ].join('\n'));
+    } catch (error) {
+      session.step = 'staff_add_change';
+      return withStaffHomeAction(`新增失敗：${error.message}\n請修改資料後再送出。`);
+    }
+  }
+  if (session.step === 'staff_add_confirm' && isAbortRescheduleText(text)) {
+    resetStaffSession(session);
+    return buildStaffMenu();
+  }
+
+  session.staffAddBooking = session.staffAddBooking || {};
+  if (/^\d+$/.test(String(text || '').trim()) && Array.isArray(session.staffSlotOptions)) {
+    const slot = session.staffSlotOptions[Number(text.trim()) - 1];
+    if (slot) {
+      session.staffAddBooking.date = slot.date;
+      session.staffAddBooking.time = slot.time;
+      session.staffAddBooking.artist = slot.artist;
+    }
+  }
+  const local = extractLocalBookingData(text, config);
+  mergeBookingData(session.staffAddBooking, local.booking);
+  mergeStaffContactData(session.staffAddBooking, text, config);
+  const draft = session.staffAddBooking;
+  const service = findService(config.services, draft.service);
+
+  if (!draft.date || !draft.time || !service || !draft.artist || !draft.customerName || !draft.phone) {
+    session.step = 'staff_add_change';
+    return withStaffHomeAction([
+      '請補齊新增預約資料：日期、時間、服務、美甲師、姓名、手機。',
+      '例如：新增預約 5/21 16:00 單色 Amy 王小美 0912345678',
+      '',
+      formatStaffAddDraft(draft),
+    ].join('\n'));
+  }
+  if (!isValidTaiwanMobile(draft.phone)) {
+    draft.phone = '';
+    return withStaffHomeAction('手機號碼格式不正確，請輸入 09 開頭的 10 碼手機號碼。');
+  }
+  const slots = findConsecutiveSlots(config.slots, draft, service, config.settings);
+  if (!isBookingFarEnough(draft, config.settings) || !slots.length) {
+    session.step = 'staff_add_change';
+    const suggestions = findAvailableStartSlots(config.slots, {
+      artist: draft.artist,
+      date: draft.date,
+      period: draft.period || '',
+    }, service, config.settings).slice(0, 6);
+    session.staffSlotOptions = suggestions;
+    return withStaffHomeAction([
+      buildUnavailableReason(config, draft, service) || `${draft.date} ${draft.time} 沒有足夠空檔。`,
+      suggestions.length ? '可新增以下時段：' : '請換日期、時段或美甲師。',
+      ...suggestions.map((slot, index) => `${index + 1}. ${slot.date} ${slot.time}｜${slot.artist}`),
+    ].join('\n'));
+  }
+
+  session.step = 'staff_add_confirm';
+  draft.service = service.name;
+  return [
+    '請確認是否新增這筆預約：',
+    `客人：${draft.customerName}`,
+    `電話：${draft.phone}`,
+    `服務：${service.name}`,
+    `美甲師：${draft.artist}`,
+    `時間：${draft.date} ${draft.time}`,
+    '',
+    '1. 確認新增',
+    '2. 取消新增',
+    '0. 店家模式',
+  ].join('\n');
+}
+
+function mergeStaffContactData(draft, text, config) {
+  const phone = extractTaiwanMobile(text);
+  if (phone) draft.phone = phone;
+  const candidate = extractStaffCustomerName(text, config, phone);
+  if (candidate) draft.customerName = candidate;
+}
+
+function extractStaffCustomerName(text, config, phone) {
+  let value = String(text || '').trim();
+  if (!value) return '';
+  if (phone) value = value.replace(phone, ' ');
+  (config.services || []).forEach((service) => { value = value.replace(service.name, ' '); });
+  (config.artists || []).forEach((artist) => { value = value.replace(artist.name, ' '); });
+  value = value
+    .replace(/新增預約|查空檔|延時/g, ' ')
+    .replace(/\d{1,2}\s*月\s*\d{1,2}\s*(日|號)?/g, ' ')
+    .replace(/\d{1,2}[/-]\d{1,2}/g, ' ')
+    .replace(/\d{1,2}[:：]\d{2}/g, ' ')
+    .replace(/\d{3,4}/g, ' ')
+    .replace(/上午|下午|晚上|早上|點|半|分/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!value || /^\d+$/.test(value)) return '';
+  return value.split(' ')[0];
+}
+
+function formatStaffAddDraft(draft = {}) {
+  return [
+    `目前：日期 ${draft.date || '未填'}｜時間 ${draft.time || '未填'}｜服務 ${draft.service || '未填'}`,
+    `美甲師 ${draft.artist || '未填'}｜姓名 ${draft.customerName || '未填'}｜手機 ${draft.phone || '未填'}`,
+  ].join('\n');
+}
+
+async function handleStaffExtend({ text, session }) {
+  const pendingMinutes = parseExtendMinutes(text);
+  if (pendingMinutes) session.staffExtendMinutes = pendingMinutes;
+  if (!session.staffExtendBooking) {
+    const bookingId = normalizeShortBookingInput(text);
+    if (!bookingId) return withStaffHomeAction('請輸入要延時的預約編號，例如「延時 001 30」。');
+    const loaded = await tryLoadStoreBooking(bookingId, session, 'extend');
+    if (!loaded.ok) return withStaffHomeAction(loaded.message);
+    session.staffExtendBooking = loaded.data;
+  }
+  if (!session.staffExtendMinutes) {
+    session.step = 'staff_extend_minutes';
+    return withStaffHomeAction([
+      '請輸入要延長幾分鐘，例如「30」。',
+      formatStoreBooking(session.staffExtendBooking),
+    ].join('\n'));
+  }
+  session.step = 'staff_extend_confirm';
+  return [
+    `是否將預約 ${shortBookingId(session.staffExtendBooking.id)}號延長 ${session.staffExtendMinutes} 分鐘？`,
+    formatStoreBooking(session.staffExtendBooking),
+    '',
+    '1. 確認修改',
+    '2. 取消修改',
+    '0. 店家模式',
+  ].join('\n');
+}
+
+function parseExtendMinutes(text) {
+  const raw = String(text || '');
+  const value = raw.replace(/延時|延長|分鐘|分/g, ' ');
+  const numbers = value.match(/\d+/g) || [];
+  if (!numbers.length) return 0;
+  if (/延時|延長/.test(raw) && numbers.length < 2) return 0;
+  return Number(numbers[numbers.length - 1]);
 }
 
 async function understandMessage(text, session, config) {
@@ -1262,6 +1607,26 @@ async function loadStoreBookingsByDate(date) {
 
 async function loadStoreBooking(bookingId) {
   return appsScriptRequest('getStoreBooking', { bookingId });
+}
+
+async function loadStoreBookingCandidates(bookingId) {
+  return appsScriptRequest('getStoreBookingCandidates', { bookingId });
+}
+
+async function searchStoreCustomerBookings(query) {
+  return appsScriptRequest('searchStoreCustomerBookings', { query });
+}
+
+async function storeCreateBooking(booking) {
+  const result = await appsScriptRequest('storeCreateBooking', { booking });
+  cache.expiresAt = 0;
+  return result;
+}
+
+async function storeExtendBooking(bookingId, extraMinutes) {
+  const result = await appsScriptRequest('storeExtendBooking', { bookingId, extraMinutes });
+  cache.expiresAt = 0;
+  return result;
 }
 
 async function storeCancelBooking(bookingId) {
@@ -2914,11 +3279,11 @@ function isConfirmCancelText(text) {
 }
 
 function isConfirmRescheduleText(text) {
-  return ['1', '確認修改', '確定修改', '確認改期', '確認更改', '修改沒錯'].includes(text.trim());
+  return ['1', '確認修改', '確定修改', '確認改期', '確認更改', '修改沒錯', '確認新增', '確定新增', '新增沒錯'].includes(text.trim());
 }
 
 function isAbortRescheduleText(text) {
-  return ['2', '取消修改', '取消改期', '取消更改', '回首頁', '0'].includes(String(text || '').trim());
+  return ['2', '取消修改', '取消改期', '取消更改', '取消新增', '回首頁', '0'].includes(String(text || '').trim());
 }
 
 function isAbortCancelText(text) {
