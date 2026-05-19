@@ -56,6 +56,13 @@ async function handleEvent(event) {
   let config = null;
   try {
     const existingSession = sessions.get(userId);
+    if (existingSession?.step === 'ask_contact' && !isFastRestartText(text)) {
+      ensureSessionShape(existingSession, {});
+      const answer = continueContactStep({ text, session: existingSession, config: cache.data || {} });
+      await replyWithMemory(event, userId, existingSession, answer);
+      return;
+    }
+
     if (text === '0' && existingSession?.step?.startsWith('staff_')) {
       resetStaffSession(existingSession);
       await safeReplyText(event, userId, buildStaffMenu());
