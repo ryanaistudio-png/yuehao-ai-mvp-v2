@@ -878,6 +878,7 @@ function getApiConfig_(ss) {
     settings,
     services: readServices_(ss).filter((service) => service.lineOpen),
     artists: readArtists_(ss).filter((artist) => artist.status === '可接單'),
+    specials: readSpecialDays_(ss),
     slots: readSlots_(ss),
   };
 }

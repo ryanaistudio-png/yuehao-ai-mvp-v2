@@ -55,6 +55,13 @@ async function handleEvent(event) {
   const text = event.message.text.trim();
   let config = null;
   try {
+    const existingSession = sessions.get(userId);
+    if (text === '0' && existingSession?.step?.startsWith('staff_')) {
+      resetStaffSession(existingSession);
+      await safeReplyText(event, userId, buildStaffMenu());
+      return;
+    }
+
     if (isFastRestartText(text)) {
       sessions.delete(userId);
       await safeReplyText(event, userId, buildRestartMessage());
@@ -311,7 +318,8 @@ async function runConversation({ userId, profile, text, ai, session, config, loc
     const requested = formatFriendlyDateTime(session.booking.date, session.booking.time);
     session.booking.time = '';
     session.step = 'ask_time';
-    return `${requested} 沒有足夠完成「${service.name}」的連續空檔。\n\n${buildAvailableSlots(config, session.booking.artist, service, session.booking)}`;
+    const reason = buildUnavailableReason(config, session.booking, service);
+    return `${reason || `${requested} 沒有足夠完成「${service.name}」的連續空檔。`}\n\n${buildAvailableSlots(config, session.booking.artist, service, session.booking)}`;
   }
 
   if (!session.booking.customerName || !session.booking.phone) {
@@ -393,6 +401,12 @@ async function runConversation({ userId, profile, text, ai, session, config, loc
 async function handleCancelFlow({ userId, text, ai, session, config }) {
   const bookingIdFromText = normalizeShortBookingInput(ai.cancel?.bookingId || text);
 
+  if (session.step === 'cancel_confirm' && isAbortCancelText(text)) {
+    sessions.delete(userId);
+    session.step = 'start';
+    return buildRestartMessage();
+  }
+
   if (session.step === 'cancel_confirm' && isConfirmCancelText(text)) {
     const booking = session.cancelBooking;
     if (!booking) {
@@ -441,7 +455,9 @@ async function handleCancelFlow({ userId, text, ai, session, config }) {
     `服務：${target.service}`,
     `美甲師：${target.artist}`,
     `時間：${target.date} ${target.start}`,
-    '確認取消請回覆「確認取消」。',
+    '1. 確認刪除',
+    '2. 取消刪除',
+    '0. 回首頁',
   ].join('\n');
 }
 
@@ -453,6 +469,11 @@ async function handleStaffFlow({ userId, text, session, config }) {
 
   if (text === '店家') {
     session.step = 'staff_menu';
+    return buildStaffMenu();
+  }
+
+  if (text === '店家模式') {
+    resetStaffSession(session);
     return buildStaffMenu();
   }
 
@@ -476,7 +497,7 @@ async function handleStaffFlow({ userId, text, session, config }) {
     return '請輸入要取消的預約編號，例如「取消 001」。';
   }
 
-  if (session.step === 'staff_cancel_confirm' && ['確認取消', '確定取消'].includes(text)) {
+  if (session.step === 'staff_cancel_confirm' && isConfirmCancelText(text)) {
     const booking = session.staffCancelBooking;
     if (!booking) {
       session.step = 'staff_menu';
@@ -486,6 +507,11 @@ async function handleStaffFlow({ userId, text, session, config }) {
     session.step = 'staff_menu';
     session.staffCancelBooking = null;
     return `已取消預約 ${shortBookingId(result.bookingId)}號。`;
+  }
+
+  if (session.step === 'staff_cancel_confirm' && isAbortCancelText(text)) {
+    resetStaffSession(session);
+    return buildStaffMenu();
   }
 
   if (session.step === 'staff_reschedule_confirm' && isConfirmRescheduleText(text)) {
@@ -508,13 +534,13 @@ async function handleStaffFlow({ userId, text, session, config }) {
     ].join('\n');
   }
 
-  if (session.step?.startsWith('staff_') && ['取消', '不用了', '0'].includes(text)) {
-    session.step = 'staff_menu';
-    session.staffBooking = null;
-    session.staffChange = {};
-    session.staffCancelBooking = null;
-    session.staffRescheduleDraft = null;
-    session.staffSlotOptions = null;
+  if (session.step === 'staff_reschedule_confirm' && isAbortRescheduleText(text)) {
+    resetStaffSession(session);
+    return buildStaffMenu();
+  }
+
+  if (session.step?.startsWith('staff_') && isStaffHomeText(text)) {
+    resetStaffSession(session);
     return buildStaffMenu();
   }
 
@@ -537,7 +563,9 @@ async function handleStaffFlow({ userId, text, session, config }) {
       '請確認是否取消這筆預約：',
       formatStoreBooking(booking),
       '',
-      '確認取消請回覆「確認取消」。',
+      '1. 確認刪除',
+      '2. 取消刪除',
+      '0. 店家模式',
     ].join('\n');
   }
 
@@ -567,10 +595,24 @@ async function handleStaffFlow({ userId, text, session, config }) {
 function isStaffCommandText(text, session) {
   if (session.step?.startsWith('staff_')) return true;
   return text === '店家'
+    || text === '店家模式'
     || text === '今日預約'
     || /^查預約\s*\d+/.test(text)
     || /^修改\s*(預約\s*)?\d+/.test(text)
     || /^取消\s*(預約\s*)?\d+/.test(text);
+}
+
+function resetStaffSession(session) {
+  session.step = 'staff_menu';
+  session.staffBooking = null;
+  session.staffChange = {};
+  session.staffCancelBooking = null;
+  session.staffRescheduleDraft = null;
+  session.staffSlotOptions = null;
+}
+
+function isStaffHomeText(text) {
+  return ['0', '店家模式', '回店家模式', '回首頁', '取消修改', '取消刪除', '取消', '不用了'].includes(String(text || '').trim());
 }
 
 function isStaffUser(userId) {
@@ -662,7 +704,7 @@ function handleStaffRescheduleChange({ text, session, config }) {
   const slots = findConsecutiveSlots(config.slots, next, service, config.settings, booking.id);
   if (!isBookingFarEnough(next, config.settings) || !slots.length) {
     session.step = 'staff_reschedule_change';
-    return buildStaffRescheduleSlotOptions({ config, session, booking, next, change, service });
+    return buildStaffRescheduleSlotOptions({ config, session, booking, next, change, service, requestedTime: next.time });
   }
   session.step = 'staff_reschedule_confirm';
   session.staffRescheduleDraft = next;
@@ -672,19 +714,22 @@ function handleStaffRescheduleChange({ text, session, config }) {
     `原本：${booking.date} ${booking.start}｜${booking.artist}｜${booking.service}`,
     `改成：${next.date} ${next.time}｜${next.artist}｜${service.name}`,
     '',
-    '確認請回覆「確認修改」。',
+    '1. 確認修改',
+    '2. 取消修改',
+    '0. 店家模式',
   ].join('\n');
 }
 
-function buildStaffRescheduleSlotOptions({ config, session, booking, next, change, service }) {
+function buildStaffRescheduleSlotOptions({ config, session, booking, next, change, service, requestedTime = '' }) {
   const suggestions = findAvailableStartSlots(config.slots, {
     artist: next.artist,
     date: next.date,
     period: change.period || '',
   }, service, config.settings, booking.id).slice(0, 6);
   session.staffSlotOptions = suggestions;
+  const reason = buildUnavailableReason(config, { ...next, time: requestedTime || next.time }, service);
   return [
-    `${next.date || '指定日期'} ${next.time || ''} 目前沒有足夠完成「${service.name}」的連續空檔。`,
+    reason || `${next.date || '指定日期'} ${next.time || ''} 目前沒有足夠完成「${service.name}」的連續空檔。`,
     suggestions.length ? '可改約以下時段：' : '請換日期、時段或美甲師。',
     ...suggestions.map((slot, index) => `${index + 1}. ${slot.date} ${slot.time}｜${slot.artist}`),
   ].join('\n');
@@ -909,6 +954,15 @@ function normalizeConfig(data = {}) {
       name: String(artist.name || '').trim(),
       status: String(artist.status || '').trim(),
       note: String(artist.note || '').trim(),
+    })),
+    specials: (data.specials || []).map((special) => ({
+      ...special,
+      artist: String(special.artist || '').trim(),
+      date: String(special.date || '').trim(),
+      type: String(special.type || '').trim(),
+      start: Number(special.start || 0),
+      end: Number(special.end || 24 * 60),
+      note: String(special.note || '').trim(),
     })),
     slots: (data.slots || []).map((slot) => ({
       ...slot,
@@ -1240,6 +1294,9 @@ function restartOptionLine() {
 }
 
 function buildNoAvailableSlotsMessage(config, artist, service, booking = {}) {
+  const reason = buildUnavailableReason(config, { ...booking, artist }, service);
+  if (reason) return withNoSlotActions(reason);
+
   const scope = [
     booking.date ? booking.date : '',
     booking.period ? periodLabel(booking.period) : '',
@@ -1265,6 +1322,36 @@ function buildNoAvailableSlotsMessage(config, artist, service, booking = {}) {
 
   const message = `${prefix}目前沒有足夠完成「${service.name}」的連續空檔，請換其他日期、時段或美甲師。`;
   return booking.date ? withNoSlotActions(message) : [message, restartOptionLine()].join('\n');
+}
+
+function buildUnavailableReason(config, booking = {}, service = {}) {
+  const holiday = findHolidayConflict(config, booking, service);
+  if (holiday) {
+    const date = booking.date || holiday.date;
+    const time = booking.time ? ` ${booking.time}` : '';
+    const note = holiday.note ? `（${holiday.note}）` : '';
+    if (holiday.artist === '全店') return `${date}${time} 是全店休假${note}，請換其他日期。`;
+    return `${date}${time} ${holiday.artist} 休假${note}，請換其他日期、時段或美甲師。`;
+  }
+  return '';
+}
+
+function findHolidayConflict(config, booking = {}, service = {}) {
+  if (!booking.date) return null;
+  const artist = booking.artist && !isAnyArtist(booking.artist) ? booking.artist : '';
+  const start = booking.time ? timeToMinutes(booking.time) : null;
+  const duration = Number(service.duration || booking.duration || 0) || Number(config?.settings?.slot_minutes || 30);
+  const end = start === null ? null : start + duration;
+  const holidays = (config.specials || []).filter((special) => (
+    special.date === booking.date
+    && special.type === '休假'
+    && (special.artist === '全店' || !artist || special.artist === artist)
+  ));
+  if (!holidays.length) return null;
+  const fullDay = holidays.find((special) => Number(special.start || 0) <= 0 && Number(special.end || 0) >= 24 * 60);
+  if (fullDay) return fullDay;
+  if (start === null || end === null) return holidays[0];
+  return holidays.find((special) => start < Number(special.end || 0) && end > Number(special.start || 0)) || null;
 }
 
 function withNoSlotActions(message) {
@@ -1627,6 +1714,12 @@ async function handleRescheduleFlow({ userId, text, ai, local, session, config }
     ].join('\n');
   }
 
+  if (session.step === 'reschedule_confirm' && isAbortRescheduleText(text)) {
+    sessions.delete(userId);
+    session.step = 'start';
+    return buildRestartMessage();
+  }
+
   if (session.step === 'reschedule_confirm' && isConfirmRescheduleText(text)) {
     const draft = session.rescheduleDraft;
     if (!draft) {
@@ -1724,8 +1817,9 @@ async function handleRescheduleFlow({ userId, text, ai, local, session, config }
     session.step = 'reschedule_change';
     const suggestions = findAvailableStartSlots(config.slots, { artist: next.artist, date: next.date, period: change.period || '' }, service, config.settings, booking.id).slice(0, 6);
     session.rescheduleSlotOptions = suggestions;
+    const reason = buildUnavailableReason(config, next, service);
     return [
-      `${next.date} ${next.time} 目前沒有足夠完成「${service.name}」的連續空檔。`,
+      reason || `${next.date} ${next.time} 目前沒有足夠完成「${service.name}」的連續空檔。`,
       suggestions.length ? '以下是附近可約時間：' : '請換其他日期或時段。',
       ...suggestions.map((slot, index) => `${index + 1}. ${slot.date} ${slot.time}｜${slot.artist}`),
       suggestions.length ? '請直接回覆編號，或輸入其他日期時間。' : '',
@@ -1740,7 +1834,9 @@ async function handleRescheduleFlow({ userId, text, ai, local, session, config }
     `原本：${booking.date} ${booking.start}｜${booking.artist}｜${booking.service}`,
     `改成：${next.date} ${next.time}｜${next.artist}｜${service.name}`,
     '',
-    '確認請回覆「確認修改」。',
+    '1. 確認修改',
+    '2. 取消修改',
+    '0. 回首頁',
   ].join('\n');
 }
 
@@ -2056,7 +2152,9 @@ async function handleOptionNumberSelection({ userId, profile, text, session, con
       `服務：${target.service}`,
       `美甲師：${target.artist}`,
       `時間：${target.date} ${target.start}`,
-      '確認取消請回覆「確認取消」。',
+      '1. 確認刪除',
+      '2. 取消刪除',
+      '0. 回首頁',
     ].join('\n');
   }
 
@@ -2537,11 +2635,19 @@ function isConfirmBookingText(text) {
 }
 
 function isConfirmCancelText(text) {
-  return ['確認取消', '確定取消', '取消沒錯'].includes(text.trim());
+  return ['1', '確認取消', '確定取消', '取消沒錯', '確認刪除', '確定刪除', '刪除沒錯'].includes(text.trim());
 }
 
 function isConfirmRescheduleText(text) {
-  return ['確認修改', '確定修改', '確認改期', '確認更改', '修改沒錯'].includes(text.trim());
+  return ['1', '確認修改', '確定修改', '確認改期', '確認更改', '修改沒錯'].includes(text.trim());
+}
+
+function isAbortRescheduleText(text) {
+  return ['2', '取消修改', '取消改期', '取消更改', '回首頁', '0'].includes(String(text || '').trim());
+}
+
+function isAbortCancelText(text) {
+  return ['2', '取消刪除', '取消取消', '保留預約', '回首頁', '0'].includes(String(text || '').trim());
 }
 
 function requiredEnv(name) {
