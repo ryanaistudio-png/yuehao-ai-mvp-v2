@@ -1151,6 +1151,7 @@ async function loadCustomerProfile(userId) {
 async function hydrateKnownCustomer(session, userId) {
   if (session.customerProfileLoaded) return;
   session.customerProfileLoaded = true;
+  if (isStaffUser(userId)) return;
   try {
     const customer = await loadCustomerProfile(userId);
     if (!customer) return;
