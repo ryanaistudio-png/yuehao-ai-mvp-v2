@@ -36,6 +36,7 @@ const lineClient = new line.messagingApi.MessagingApiClient({
 
 const sessions = new Map();
 const cache = { expiresAt: 0, data: null };
+const ANY_ARTIST = '不指定';
 
 app.get('/', (_req, res) => {
   res.json({ ok: true, service: '約好 AI MVP v3', webhook: '/line/webhook' });
@@ -52,10 +53,30 @@ async function handleEvent(event) {
 
   const userId = event.source.userId || event.source.groupId || event.source.roomId || 'unknown';
   const text = event.message.text.trim();
+  let config = null;
   try {
-    const config = await loadConfig();
+    const existingSession = sessions.get(userId);
+    if (text === '0' && existingSession?.step?.startsWith('staff_')) {
+      resetStaffSession(existingSession);
+      await safeReplyText(event, userId, buildStaffMenu());
+      return;
+    }
+
+    if (isFastRestartText(text)) {
+      sessions.delete(userId);
+      await safeReplyText(event, userId, buildRestartMessage());
+      return;
+    }
+
+    config = await loadConfig();
     let session = getSession(userId, config);
     rememberUserMessage(session, text);
+
+    const staffAnswer = await handleStaffFlow({ userId, text, session, config });
+    if (staffAnswer) {
+      await replyWithMemory(event, userId, session, staffAnswer);
+      return;
+    }
 
     if (isResetText(text)) {
       sessions.delete(userId);
@@ -87,7 +108,7 @@ async function handleEvent(event) {
     }
 
     if (isGreetingText(text)) {
-      await replyWithMemory(event, userId, session, '您好，我可以協助預約、調整已有預約或查詢可約時段。若要預約，請直接回覆「預約」。');
+      await replyWithMemory(event, userId, session, buildRestartMessage());
       return;
     }
     if (isStartBookingText(text)) {
@@ -95,6 +116,16 @@ async function handleEvent(event) {
       session = getSession(userId, config);
       session.step = 'ask_service';
       await replyWithMemory(event, userId, session, buildServiceOptions(config));
+      return;
+    }
+    if (session.step === 'start' && ['1', '2'].includes(text)) {
+      if (text === '1') {
+        session.step = 'ask_service';
+        await replyWithMemory(event, userId, session, buildServiceOptions(config));
+        return;
+      }
+      const answer = await handleRescheduleFlow({ userId, text: '我要改時間', ai: emptyAi(), local: extractLocalBookingData('', config), session, config });
+      await replyWithMemory(event, userId, session, answer || '我沒有收到完整訊息，請再說一次。');
       return;
     }
     if (isRescheduleText(text) && !isSlotRefinementText(text, session)) {
@@ -126,6 +157,12 @@ async function handleEvent(event) {
       await safeReplyText(event, userId, '好的，先不預約。如需預約再告訴我。');
       return;
     }
+    if (session.step === 'confirm_booking' && ['2', '取消', '取消預約'].includes(text)) {
+      sessions.delete(userId);
+      session = getSession(userId, config);
+      await replyWithMemory(event, userId, session, buildRestartMessage());
+      return;
+    }
 
     const profile = await getLineProfile(userId);
     const ai = shouldSkipAi(text, session, local)
@@ -142,7 +179,7 @@ async function handleEvent(event) {
       const complexByAi = await handleComplexOrMultiPersonRequest({ userId, text, session, config, local });
       if (!complexByAi) {
         sessions.delete(userId);
-        notifyShopIfEnabled(config, 'pending', `需要店家確認的多人預約需求\n客人來源：${userId}\n訊息：${text}`).catch((error) => {
+        notifyShop(`需要店家確認的多人預約需求\n客人來源：${userId}\n訊息：${text}`, config, 'pending').catch((error) => {
           console.error('notifyShop failed:', error.response?.data || error.message);
         });
       }
@@ -152,8 +189,8 @@ async function handleEvent(event) {
     const answer = await runConversation({ userId, profile, text, ai, session, config, local });
     await replyWithMemory(event, userId, session, answer || '我沒有收到完整訊息，請再說一次。');
   } catch (error) {
-    console.error('handleEvent failed:', error);
-    await safeReplyText(event, userId, '系統暫時忙碌，請稍後再試；若急著預約，請直接聯絡店家協助。');
+    console.error('handleEvent failed:', formatErrorForLog(error));
+    await safeReplyText(event, userId, buildBusyMessage(config));
   }
 }
 
@@ -193,7 +230,12 @@ async function runConversation({ userId, profile, text, ai, session, config, loc
 
   const isActiveBookingFlow = Boolean(session.booking?.service || session.booking?.artist || session.step?.startsWith('ask_') || session.step === 'confirm_booking');
   if (ai.intent === 'faq' && !(isActiveBookingFlow && (local.booking.date || local.booking.period || local.booking.time))) {
-    return answerFaq(text, config) || config.settings.ai_fallback_reply || '這個問題我幫您請店家確認。';
+    const faqAnswer = answerFaq(text, config);
+    if (faqAnswer) return faqAnswer;
+    notifyShop(`待回答問題\n客人來源：${userId}\n訊息：${text}`, config, 'pending').catch((error) => {
+      console.error('notifyShop failed:', error.response?.data || error.message);
+    });
+    return config.settings.ai_fallback_reply || '這個問題我幫您請店家確認。';
   }
 
   forceSearchCorrectionFromLocalText(ai, local);
@@ -229,14 +271,9 @@ async function runConversation({ userId, profile, text, ai, session, config, loc
   session.booking.service = service.name;
   session.booking.duration = service.duration;
 
-  const activeArtists = config.artists || [];
+  const activeArtists = getBookableArtists(config, service);
   if (!session.booking.artist && activeArtists.length === 1) {
     session.booking.artist = activeArtists[0].name;
-  }
-
-  if (!session.booking.artist) {
-    session.step = 'ask_artist';
-    return buildArtistOptions(config, service);
   }
 
   if (!session.booking.date && session.booking.time) {
@@ -250,19 +287,6 @@ async function runConversation({ userId, profile, text, ai, session, config, loc
 
   if (!session.booking.date || !session.booking.time) {
     session.step = 'ask_time';
-    if (session.booking.artist && !findAvailableStartSlots(config.slots, session.booking, service, config.settings).length) {
-      const alternatives = artistsWithAvailableSlots(config, session.booking, service, session.booking.artist);
-      if (alternatives.length) {
-        const unavailableArtist = session.booking.artist;
-        session.booking.artist = '';
-        session.step = 'ask_artist';
-        return [
-          `${unavailableArtist} 目前沒有足夠的可預約時段，可以換其他美甲師。`,
-          '',
-          buildArtistOptions(config, service),
-        ].join('\n');
-      }
-    }
     const alternatives = findAlternativeArtistSlots(config, session.booking, service);
     if (session.booking.artist && session.booking.date && !findAvailableStartSlots(config.slots, session.booking, service, config.settings).length && alternatives.length) {
       const unavailableArtist = session.booking.artist;
@@ -273,6 +297,10 @@ async function runConversation({ userId, profile, text, ai, session, config, loc
         '',
         buildArtistOptions(config, service),
       ].join('\n');
+    }
+    if (session.booking.date && session.booking.period && !session.booking.artist && activeArtists.length > 1) {
+      session.step = 'ask_artist';
+      return buildArtistOptions(config, service, session.booking);
     }
     return buildAvailableSlots(config, session.booking.artist, service, session.booking);
   }
@@ -290,7 +318,8 @@ async function runConversation({ userId, profile, text, ai, session, config, loc
     const requested = formatFriendlyDateTime(session.booking.date, session.booking.time);
     session.booking.time = '';
     session.step = 'ask_time';
-    return `${requested} 沒有足夠完成「${service.name}」的連續空檔。\n\n${buildAvailableSlots(config, session.booking.artist, service, session.booking)}`;
+    const reason = buildUnavailableReason(config, session.booking, service);
+    return `${reason || `${requested} 沒有足夠完成「${service.name}」的連續空檔。`}\n\n${buildAvailableSlots(config, session.booking.artist, service, session.booking)}`;
   }
 
   if (!session.booking.customerName || !session.booking.phone) {
@@ -321,12 +350,17 @@ async function runConversation({ userId, profile, text, ai, session, config, loc
       `時間：${session.booking.date} ${session.booking.time}`,
       `姓名：${session.booking.customerName}`,
       `電話：${session.booking.phone}`,
-      '確認無誤請回覆「888」。',
+      '1. 確認預約',
+      '2. 取消',
     ].join('\n');
   }
 
   if (!isConfirmBookingText(text)) {
-    return '如果資訊正確，請回覆「888」。如果要重來，請回覆「重來」。';
+    return [
+      '請用下方按鈕確認或取消預約。',
+      '1. 確認預約',
+      '2. 取消',
+    ].join('\n');
   }
 
   let booking;
@@ -348,7 +382,7 @@ async function runConversation({ userId, profile, text, ai, session, config, loc
     ].join('\n');
   }
   await lockSlots(slots, booking.bookingId);
-  notifyShopIfEnabled(config, 'new', `新預約 ${booking.bookingId}\n客人：${booking.customerName}\n電話：${booking.phone}\n服務：${booking.service}\n美甲師：${booking.artist}\n時間：${booking.date} ${booking.time}`).catch((error) => {
+  notifyShop(`新預約 ${booking.bookingId}\n客人：${booking.customerName}\n電話：${booking.phone}\n服務：${booking.service}\n美甲師：${booking.artist}\n時間：${booking.date} ${booking.time}`, config, 'new').catch((error) => {
     console.error('notifyShop failed:', error.response?.data || error.message);
   });
   sessions.delete(userId);
@@ -367,6 +401,12 @@ async function runConversation({ userId, profile, text, ai, session, config, loc
 async function handleCancelFlow({ userId, text, ai, session, config }) {
   const bookingIdFromText = normalizeShortBookingInput(ai.cancel?.bookingId || text);
 
+  if (session.step === 'cancel_confirm' && isAbortCancelText(text)) {
+    sessions.delete(userId);
+    session.step = 'start';
+    return buildRestartMessage();
+  }
+
   if (session.step === 'cancel_confirm' && isConfirmCancelText(text)) {
     const booking = session.cancelBooking;
     if (!booking) {
@@ -376,7 +416,7 @@ async function handleCancelFlow({ userId, text, ai, session, config }) {
     try {
       await cancelBooking(userId, booking.id);
       await releaseLockedSlots(booking.id);
-      notifyShopIfEnabled(config, 'cancel', `預約已取消 ${booking.id}\n客人：${booking.customer}\n服務：${booking.service}\n美甲師：${booking.artist}\n時間：${booking.date} ${booking.start}`).catch((error) => {
+      notifyShop(`預約已取消 ${booking.id}\n客人：${booking.customer}\n服務：${booking.service}\n美甲師：${booking.artist}\n時間：${booking.date} ${booking.start}`, config, 'cancel').catch((error) => {
         console.error('notifyShop failed:', error.response?.data || error.message);
       });
       sessions.delete(userId);
@@ -415,7 +455,283 @@ async function handleCancelFlow({ userId, text, ai, session, config }) {
     `服務：${target.service}`,
     `美甲師：${target.artist}`,
     `時間：${target.date} ${target.start}`,
-    '確認取消請回覆「確認取消」。',
+    '1. 確認刪除',
+    '2. 取消刪除',
+    '0. 回首頁',
+  ].join('\n');
+}
+
+async function handleStaffFlow({ userId, text, session, config }) {
+  if (!isStaffCommandText(text, session)) return '';
+  if (!isStaffUser(userId)) {
+    return '這是店家管理指令，目前此 LINE 帳號尚未開通店家權限。';
+  }
+
+  if (text === '店家') {
+    session.step = 'staff_menu';
+    return buildStaffMenu();
+  }
+
+  if (text === '店家模式') {
+    resetStaffSession(session);
+    return buildStaffMenu();
+  }
+
+  if (text === '今日預約' || text === '1' && session.step === 'staff_menu') {
+    session.step = 'staff_menu';
+    return buildStoreTodayBookings(await loadStoreTodayBookings());
+  }
+
+  if (text === '2' && session.step === 'staff_menu') {
+    session.step = 'staff_lookup';
+    return '請輸入要查詢的預約編號，例如「查預約 001」。';
+  }
+
+  if (text === '3' && session.step === 'staff_menu') {
+    session.step = 'staff_reschedule_wait_id';
+    return '請輸入要修改的預約編號，例如「修改 001」。';
+  }
+
+  if (text === '4' && session.step === 'staff_menu') {
+    session.step = 'staff_cancel_wait_id';
+    return '請輸入要取消的預約編號，例如「取消 001」。';
+  }
+
+  if (session.step === 'staff_cancel_confirm' && isConfirmCancelText(text)) {
+    const booking = session.staffCancelBooking;
+    if (!booking) {
+      session.step = 'staff_menu';
+      return '取消資訊已過期，請重新輸入「取消 001」。';
+    }
+    const result = await storeCancelBooking(booking.id);
+    session.step = 'staff_menu';
+    session.staffCancelBooking = null;
+    return `已取消預約 ${shortBookingId(result.bookingId)}號。`;
+  }
+
+  if (session.step === 'staff_cancel_confirm' && isAbortCancelText(text)) {
+    resetStaffSession(session);
+    return buildStaffMenu();
+  }
+
+  if (session.step === 'staff_reschedule_confirm' && isConfirmRescheduleText(text)) {
+    const draft = session.staffRescheduleDraft;
+    if (!draft) {
+      session.step = 'staff_reschedule_wait_id';
+      return '修改資訊已過期，請重新輸入「修改 001」。';
+    }
+    const result = await storeRescheduleBooking(draft);
+    session.step = 'staff_menu';
+    session.staffBooking = null;
+    session.staffChange = {};
+    session.staffRescheduleDraft = null;
+    return [
+      '已修改預約！',
+      `預約編號：${shortBookingId(result.bookingId)}號`,
+      `服務：${result.service}`,
+      `美甲師：${result.artist}`,
+      `時間：${result.date} ${result.time}`,
+    ].join('\n');
+  }
+
+  if (session.step === 'staff_reschedule_confirm' && isAbortRescheduleText(text)) {
+    resetStaffSession(session);
+    return buildStaffMenu();
+  }
+
+  if (session.step?.startsWith('staff_') && isStaffHomeText(text)) {
+    resetStaffSession(session);
+    return buildStaffMenu();
+  }
+
+  const lookupId = /^查預約/.test(text) ? normalizeShortBookingInput(text) : '';
+  if (lookupId || session.step === 'staff_lookup') {
+    const bookingId = lookupId || normalizeShortBookingInput(text);
+    if (!bookingId) return '請輸入要查詢的預約編號，例如「查預約 001」。';
+    session.step = 'staff_menu';
+    return formatStoreBooking(await loadStoreBooking(bookingId));
+  }
+
+  const cancelId = /^取消\s*\d+|^取消\s*預約\s*\d+/.test(text) ? normalizeShortBookingInput(text) : '';
+  if (cancelId || session.step === 'staff_cancel_wait_id') {
+    const bookingId = cancelId || normalizeShortBookingInput(text);
+    if (!bookingId) return '請輸入要取消的預約編號，例如「取消 001」。';
+    const booking = await loadStoreBooking(bookingId);
+    session.step = 'staff_cancel_confirm';
+    session.staffCancelBooking = booking;
+    return [
+      '請確認是否取消這筆預約：',
+      formatStoreBooking(booking),
+      '',
+      '1. 確認刪除',
+      '2. 取消刪除',
+      '0. 店家模式',
+    ].join('\n');
+  }
+
+  const modifyId = /^修改\s*\d+|^修改\s*預約\s*\d+/.test(text) ? normalizeShortBookingInput(text) : '';
+  if (modifyId || session.step === 'staff_reschedule_wait_id') {
+    const bookingId = modifyId || normalizeShortBookingInput(text);
+    if (!bookingId) return '請輸入要修改的預約編號，例如「修改 001」。';
+    const booking = await loadStoreBooking(bookingId);
+    session.step = 'staff_reschedule_change';
+    session.staffBooking = booking;
+    session.staffChange = {};
+    return [
+      '我找到這筆預約：',
+      formatStoreBooking(booking),
+      '',
+      '請輸入新的日期與時間，例如「5/20 下午 4 點」。',
+    ].join('\n');
+  }
+
+  if (session.step === 'staff_reschedule_change') {
+    return handleStaffRescheduleChange({ text, session, config });
+  }
+
+  return '';
+}
+
+function isStaffCommandText(text, session) {
+  if (session.step?.startsWith('staff_')) return true;
+  return text === '店家'
+    || text === '店家模式'
+    || text === '今日預約'
+    || /^查預約\s*\d+/.test(text)
+    || /^修改\s*(預約\s*)?\d+/.test(text)
+    || /^取消\s*(預約\s*)?\d+/.test(text);
+}
+
+function resetStaffSession(session) {
+  session.step = 'staff_menu';
+  session.staffBooking = null;
+  session.staffChange = {};
+  session.staffCancelBooking = null;
+  session.staffRescheduleDraft = null;
+  session.staffSlotOptions = null;
+}
+
+function isStaffHomeText(text) {
+  return ['0', '店家模式', '回店家模式', '回首頁', '取消修改', '取消刪除', '取消', '不用了'].includes(String(text || '').trim());
+}
+
+function isStaffUser(userId) {
+  const ids = [process.env.SHOP_NOTIFY_LINE_ID, process.env.SHOP_STAFF_LINE_IDS]
+    .filter(Boolean)
+    .flatMap((value) => String(value).split(','))
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (!ids.length) return true;
+  return ids.includes(userId);
+}
+
+function buildStaffMenu() {
+  return [
+    '店家模式',
+    '1. 今日預約',
+    '2. 查預約',
+    '3. 修改預約',
+    '4. 取消預約',
+  ].join('\n');
+}
+
+function buildStoreTodayBookings(bookings) {
+  if (!bookings.length) return '今天目前沒有預約。';
+  return [
+    '今日預約：',
+    ...bookings.map((booking) => `${shortBookingId(booking.id)}｜${booking.start}｜${booking.artist}｜${booking.service}｜${booking.customer}｜${booking.phone}`),
+  ].join('\n');
+}
+
+function formatStoreBooking(booking) {
+  return [
+    `預約編號：${shortBookingId(booking.id)}號`,
+    `狀態：${booking.status}`,
+    `客人：${booking.customer}`,
+    `電話：${booking.phone}`,
+    `服務：${booking.service}`,
+    `美甲師：${booking.artist}`,
+    `時間：${booking.date} ${booking.start}-${booking.end}`,
+  ].join('\n');
+}
+
+function handleStaffRescheduleChange({ text, session, config }) {
+  const booking = session.staffBooking;
+  if (!booking) {
+    session.step = 'staff_reschedule_wait_id';
+    return '修改資訊已過期，請重新輸入「修改 001」。';
+  }
+  if (/^\d+$/.test(text.trim()) && Array.isArray(session.staffSlotOptions)) {
+    const slot = session.staffSlotOptions[Number(text.trim()) - 1];
+    if (slot) {
+      session.staffChange.date = slot.date;
+      session.staffChange.time = slot.time;
+      session.staffChange.artist = slot.artist;
+    }
+  }
+
+  const local = extractLocalBookingData(text, config);
+  mergeBookingData(session.staffChange, local.booking);
+  if ((local.booking.date || local.booking.period || local.booking.artist) && !local.booking.time) {
+    session.staffChange.time = '';
+  }
+  const change = session.staffChange || {};
+  const hasChangedTime = Object.prototype.hasOwnProperty.call(change, 'time');
+  const next = {
+    bookingId: booking.id,
+    service: change.service || booking.service,
+    artist: change.artist || booking.artist,
+    date: change.date || booking.date,
+    time: hasChangedTime ? change.time : booking.start,
+  };
+  const service = findService(config.services, next.service);
+  if (!service) {
+    session.staffChange.service = '';
+    return `找不到「${next.service}」服務，請重新輸入。`;
+  }
+  const artist = config.artists.find((item) => item.name === next.artist);
+  if (!artist) {
+    session.staffChange.artist = '';
+    return `找不到「${next.artist}」這位美甲師，請重新輸入。`;
+  }
+  if (!change.date && !change.time && !change.period && !change.artist) {
+    return '請輸入新的日期與時間，例如「5/20 下午 4 點」。';
+  }
+  if (!next.date || !next.time) {
+    session.step = 'staff_reschedule_change';
+    return buildStaffRescheduleSlotOptions({ config, session, booking, next, change, service });
+  }
+  const slots = findConsecutiveSlots(config.slots, next, service, config.settings, booking.id);
+  if (!isBookingFarEnough(next, config.settings) || !slots.length) {
+    session.step = 'staff_reschedule_change';
+    return buildStaffRescheduleSlotOptions({ config, session, booking, next, change, service, requestedTime: next.time });
+  }
+  session.step = 'staff_reschedule_confirm';
+  session.staffRescheduleDraft = next;
+  return [
+    `是否將預約 ${shortBookingId(booking.id)}號修改為以下內容？`,
+    '',
+    `原本：${booking.date} ${booking.start}｜${booking.artist}｜${booking.service}`,
+    `改成：${next.date} ${next.time}｜${next.artist}｜${service.name}`,
+    '',
+    '1. 確認修改',
+    '2. 取消修改',
+    '0. 店家模式',
+  ].join('\n');
+}
+
+function buildStaffRescheduleSlotOptions({ config, session, booking, next, change, service, requestedTime = '' }) {
+  const suggestions = findAvailableStartSlots(config.slots, {
+    artist: next.artist,
+    date: next.date,
+    period: change.period || '',
+  }, service, config.settings, booking.id).slice(0, 6);
+  session.staffSlotOptions = suggestions;
+  const reason = buildUnavailableReason(config, { ...next, time: requestedTime || next.time }, service);
+  return [
+    reason || `${next.date || '指定日期'} ${next.time || ''} 目前沒有足夠完成「${service.name}」的連續空檔。`,
+    suggestions.length ? '可改約以下時段：' : '請換日期、時段或美甲師。',
+    ...suggestions.map((slot, index) => `${index + 1}. ${slot.date} ${slot.time}｜${slot.artist}`),
   ].join('\n');
 }
 
@@ -621,9 +937,41 @@ function fallbackExtract(text, config = { services: [], artists: [] }) {
 async function loadConfig() {
   if (cache.data && Date.now() < cache.expiresAt) return cache.data;
   const data = await appsScriptRequest('getConfig');
-  cache.data = data;
+  cache.data = normalizeConfig(data);
   cache.expiresAt = Date.now() + 60 * 1000;
   return cache.data;
+}
+
+function normalizeConfig(data = {}) {
+  return {
+    ...data,
+    services: (data.services || []).map((service) => ({
+      ...service,
+      name: String(service.name || '').trim(),
+    })),
+    artists: (data.artists || []).map((artist) => ({
+      ...artist,
+      name: String(artist.name || '').trim(),
+      status: String(artist.status || '').trim(),
+      note: String(artist.note || '').trim(),
+    })),
+    specials: (data.specials || []).map((special) => ({
+      ...special,
+      artist: String(special.artist || '').trim(),
+      date: String(special.date || '').trim(),
+      type: String(special.type || '').trim(),
+      start: Number(special.start || 0),
+      end: Number(special.end || 24 * 60),
+      note: String(special.note || '').trim(),
+    })),
+    slots: (data.slots || []).map((slot) => ({
+      ...slot,
+      artist: String(slot.artist || '').trim(),
+      status: String(slot.status || '').trim(),
+      lockedBookingId: String(slot.lockedBookingId || '').trim(),
+      time: normalizeTime(slot.time),
+    })),
+  };
 }
 
 async function createBooking({ userId, lineDisplayName, booking, service }) {
@@ -640,6 +988,9 @@ async function createBooking({ userId, lineDisplayName, booking, service }) {
       lineDisplayName: lineDisplayName || '',
     },
   });
+  if (!result?.bookingId) {
+    throw new Error(`Apps Script did not return bookingId for createBooking: ${safeJson(result)}`);
+  }
   cache.expiresAt = 0;
   return result;
 }
@@ -681,6 +1032,26 @@ async function rescheduleBooking(userId, booking) {
   return result;
 }
 
+async function loadStoreTodayBookings() {
+  return appsScriptRequest('getStoreTodayBookings');
+}
+
+async function loadStoreBooking(bookingId) {
+  return appsScriptRequest('getStoreBooking', { bookingId });
+}
+
+async function storeCancelBooking(bookingId) {
+  const result = await appsScriptRequest('storeCancelBooking', { bookingId });
+  cache.expiresAt = 0;
+  return result;
+}
+
+async function storeRescheduleBooking(booking) {
+  const result = await appsScriptRequest('storeUpdateBooking', { booking });
+  cache.expiresAt = 0;
+  return result;
+}
+
 async function lockSlots(slots, bookingId) {
   return { slots, bookingId };
 }
@@ -690,14 +1061,17 @@ async function releaseLockedSlots(bookingId) {
 }
 
 function buildServiceOptions(config) {
-  const groups = buildServiceGroups(config.services);
+  const services = (config.services || []).slice(0, 12);
   return [
-    '想預約哪一類服務呢？',
-    ...groups.map((group, index) => `${index + 1}. 約 ${group.duration} 分鐘｜${formatServiceGroupNames(group.services)}`),
+    '想預約什麼服務？',
+    ...services.map((service, index) => `${index + 1}. ${formatServiceOptionLabel(service)}`),
     restartOptionLine(),
-    '如果還不知道款式，可以選「款式諮詢/簡易服務」。',
-    '請直接回覆編號。',
+    '可以點下方選項，也可以直接輸入服務名稱。',
   ].join('\n');
+}
+
+function formatServiceOptionLabel(service = {}) {
+  return `${formatServiceMenuName(service)} ${service.duration}分 ${formatServicePrice(service)}`;
 }
 
 function buildServiceGroups(services = []) {
@@ -740,11 +1114,37 @@ function isFreeService(service = {}) {
   return service.name?.includes('款式諮詢') || service.name?.includes('款式咨詢') || service.name?.includes('諮詢') || service.name?.includes('咨詢') || price === '0' || price === '免費';
 }
 
+function isAnyArtist(artist) {
+  return String(artist || '').trim() === ANY_ARTIST;
+}
+
 function buildRestartMessage() {
   return [
-    '好的，已重新開始。',
-    '請問您想預約，還是需要調整已有預約呢？',
+    '請問您想預約，還是要改時間呢？',
+    '1. 📅 我要預約',
+    '2. ✏️ 改時間',
   ].join('\n');
+}
+
+function buildBusyMessage(config) {
+  const phone = getShopPhone(config);
+  return [
+    phone
+      ? `系統暫時忙碌，請稍後再試；若急著預約，請直接聯絡店家：${phone}`
+      : '系統暫時忙碌，請稍後再試；若急著預約，請直接聯絡店家協助。',
+    '',
+    restartOptionLine(),
+  ].join('\n');
+}
+
+function getShopPhone(config) {
+  return String(
+    process.env.SHOP_PHONE
+    || config?.settings?.shop_phone
+    || config?.settings?.store_phone
+    || config?.settings?.phone
+    || ''
+  ).trim();
 }
 
 function buildPartialTimeAcknowledgement(booking) {
@@ -763,28 +1163,130 @@ function buildPartialTimeAcknowledgement(booking) {
   return '好的，我先幫您看可預約時段。';
 }
 
-function buildArtistOptions(config, service) {
-  const artists = artistsForService(config.artists, service);
+function buildArtistOptions(config, service, booking = {}) {
+  const artists = getAvailableArtistsForBooking(config, service, booking);
   const showSpecialty = isSettingEnabled(config.settings.show_artist_specialty_in_line);
+  if (!artists.length) {
+    return buildNoAvailableSlotsMessage(config, '', service, booking);
+  }
   return [
     `想指定哪位美甲師做「${service.name}」嗎？`,
     ...artists.map((artist, index) => showSpecialty && artist.note ? `${index + 1}. ${artist.name}｜${artist.note}` : `${index + 1}. ${artist.name}`),
+    `${artists.length + 1}. ${ANY_ARTIST}`,
     restartOptionLine(),
     '請直接回覆編號。',
   ].join('\n');
 }
 
 function buildAvailableSlots(config, artist, service, booking = {}) {
-  const candidates = findAvailableStartSlots(config.slots, { ...booking, artist }, service, config.settings).slice(0, 8);
+  if (!booking.date) return buildDateOptions(config, artist, service, booking);
+  if (!booking.period) return buildPeriodOptions(config, artist, service, booking);
+  if (!artist) return buildArtistOptions(config, service, booking);
+  const candidates = findAvailableStartSlots(config.slots, { ...booking, artist }, service, config.settings).slice(0, 11);
   if (!candidates.length) {
+    logSlotDebug('time_options_empty', config, artist, service, booking, candidates);
     return buildNoAvailableSlotsMessage(config, artist, service, booking);
   }
   return [
-    `${artist} 做「${service.name}」約 ${service.duration} 分鐘，可以預約以下時段：`,
-    ...candidates.map((slot, index) => `${index + 1}. ${slot.date} ${slot.time}｜${slot.artist}`),
+    `${isAnyArtist(artist) ? '不指定美甲師' : artist} 做「${service.name}」約 ${service.duration} 分鐘，${booking.date} ${periodLabel(booking.period)}可以預約以下時段：`,
+    ...candidates.map((slot, index) => `${index + 1}. ${slot.time}｜${slot.artist}`),
     restartOptionLine(),
     '請直接回覆上面的編號數字，或輸入您希望的日期與時間（例如：5/20 1600）。',
   ].join('\n');
+}
+
+function getBookableArtists(config, service) {
+  return artistsForService(config.artists, service).slice(0, 3);
+}
+
+function getAvailableArtistsForBooking(config, service, booking = {}) {
+  const artists = getBookableArtists(config, service);
+  if (!booking.date || !booking.period) return artists;
+  const diagnostics = artists.map((artist) => {
+    const slots = findAvailableStartSlots(
+      config.slots,
+      { ...booking, artist: artist.name },
+      service,
+      config.settings
+    );
+    return {
+      artist,
+      count: slots.length,
+      firstSlots: slots.slice(0, 5).map((slot) => `${slot.date} ${slot.time}`),
+    };
+  });
+  console.log(`ARTIST_OPTION_DEBUG ${JSON.stringify({
+    service: service?.name || '',
+    duration: service?.duration || '',
+    date: booking.date || '',
+    period: booking.period || '',
+    artists: diagnostics.map((item) => ({
+      name: item.artist.name,
+      count: item.count,
+      firstSlots: item.firstSlots,
+    })),
+  })}`);
+  return diagnostics.filter((item) => item.count).map((item) => item.artist);
+}
+
+function buildDateOptions(config, artist, service, booking = {}) {
+  const dates = getAvailableDateOptions(config, artist, service, booking).slice(0, 5);
+  logSlotDebug('date_options', config, artist, service, booking, dates);
+  if (!dates.length) return buildNoAvailableSlotsMessage(config, artist, service, booking);
+  const artistLabel = artist ? `${artist} 做` : '';
+  return [
+    `${artistLabel}「${service.name}」約 ${service.duration} 分鐘，想預約哪一天？`,
+    ...dates.map((date, index) => `${index + 1}. ${formatDateWithWeekday(date)}`),
+    restartOptionLine(),
+    '也可以直接輸入日期，例如：5/20。',
+  ].join('\n');
+}
+
+function buildPeriodOptions(config, artist, service, booking = {}) {
+  const periods = getAvailablePeriodOptions(config, artist, service, booking);
+  if (!periods.length) return buildNoAvailableSlotsMessage(config, artist, service, booking);
+  const artistLabel = artist ? `${artist} 做` : '';
+  return [
+    `${artistLabel}「${service.name}」，${formatDateWithWeekday(booking.date)} 想預約哪個時段？`,
+    ...periods.map((period, index) => `${index + 1}. ${periodLabel(period)}`),
+    restartOptionLine(),
+    '也可以直接輸入時間，例如：11:00。',
+  ].join('\n');
+}
+
+function getAvailableDateOptions(config, artist, service, booking = {}) {
+  const artists = artist && !isAnyArtist(artist) ? [{ name: artist }] : getBookableArtists(config, service);
+  const dates = artists.flatMap((item) => {
+    const slots = findAvailableStartSlots(config.slots, { ...booking, artist: item.name, date: '', period: '' }, service, config.settings);
+    return slots.map((slot) => slot.date);
+  });
+  return [...new Set(dates)].sort();
+}
+
+function getAvailablePeriodOptions(config, artist, service, booking = {}) {
+  const artists = artist && !isAnyArtist(artist) ? [{ name: artist }] : getBookableArtists(config, service);
+  const slots = artists.flatMap((item) => findAvailableStartSlots(config.slots, { ...booking, artist: item.name, period: '' }, service, config.settings));
+  const periods = ['morning', 'afternoon', 'evening'];
+  return periods.filter((period) => slots.some((slot) => isInPeriod(slot.time, period)));
+}
+
+function logSlotDebug(stage, config, artist, service, booking = {}, options = []) {
+  const debugArtists = artist && !isAnyArtist(artist) ? [artist] : getBookableArtists(config, service).map((item) => item.name);
+  const artistSlots = (config.slots || []).filter((slot) => !debugArtists.length || debugArtists.includes(slot.artist));
+  const openSlots = artistSlots.filter((slot) => isSlotOpenForBooking(slot));
+  const starts = service ? debugArtists.flatMap((name) => findAvailableStartSlots(config.slots || [], { ...booking, artist: name }, service, config.settings || {})) : [];
+  console.log(`SLOT_DEBUG ${JSON.stringify({
+    stage,
+    artist,
+    service: service?.name || '',
+    date: booking.date || '',
+    period: booking.period || '',
+    totalArtistSlots: artistSlots.length,
+    openArtistSlots: openSlots.length,
+    consecutiveStarts: starts.length,
+    firstStarts: starts.slice(0, 5).map((slot) => `${slot.date} ${slot.time}`),
+    options: options.slice(0, 5),
+  })}`);
 }
 
 function restartOptionLine() {
@@ -792,6 +1294,9 @@ function restartOptionLine() {
 }
 
 function buildNoAvailableSlotsMessage(config, artist, service, booking = {}) {
+  const reason = buildUnavailableReason(config, { ...booking, artist }, service);
+  if (reason) return withNoSlotActions(reason);
+
   const scope = [
     booking.date ? booking.date : '',
     booking.period ? periodLabel(booking.period) : '',
@@ -801,21 +1306,63 @@ function buildNoAvailableSlotsMessage(config, artist, service, booking = {}) {
   if (booking.date) {
     const daySlots = (config.slots || []).filter((slot) => slot.date === booking.date);
     if (!daySlots.length) {
-      return `${booking.date} 目前沒有開放預約，可能是店休、休假日或班表尚未建立。請換其他日期。`;
+      return withNoSlotActions(`${booking.date} 目前沒有開放預約，可能是店休、休假日或班表尚未建立。請換其他日期。`);
     }
 
-    const artistDaySlots = daySlots.filter((slot) => slot.artist === artist);
+    const artistDaySlots = artist && !isAnyArtist(artist) ? daySlots.filter((slot) => slot.artist === artist) : daySlots;
     if (!artistDaySlots.length) {
-      return `${booking.date} ${artist} 休假或未開放預約，請換其他日期、時段或美甲師。`;
+      return withNoSlotActions(`${booking.date} ${artist} 休假或未開放預約，請換其他日期、時段或美甲師。`);
     }
 
     const openSlots = artistDaySlots.filter((slot) => isSlotOpenForBooking(slot) && isFutureEnough(slot, config.settings));
     if (!openSlots.length) {
-      return `${prefix}${artist} 目前沒有可預約空檔，可能已滿、休假或已超過可預約時間。請換其他日期、時段或美甲師。`;
+      return withNoSlotActions(`${prefix}${artist} 目前沒有可預約空檔，可能已滿、休假或已超過可預約時間。請換其他日期、時段或美甲師。`);
     }
   }
 
-  return `${prefix}目前沒有足夠完成「${service.name}」的連續空檔，請換其他日期、時段或美甲師。`;
+  const message = `${prefix}目前沒有足夠完成「${service.name}」的連續空檔，請換其他日期、時段或美甲師。`;
+  return booking.date ? withNoSlotActions(message) : [message, restartOptionLine()].join('\n');
+}
+
+function buildUnavailableReason(config, booking = {}, service = {}) {
+  const holiday = findHolidayConflict(config, booking, service);
+  if (holiday) {
+    const date = booking.date || holiday.date;
+    const time = booking.time ? ` ${booking.time}` : '';
+    const note = holiday.note ? `（${holiday.note}）` : '';
+    if (holiday.artist === '全店') return `${date}${time} 是全店休假${note}，請換其他日期。`;
+    return `${date}${time} ${holiday.artist} 休假${note}，請換其他日期、時段或美甲師。`;
+  }
+  return '';
+}
+
+function findHolidayConflict(config, booking = {}, service = {}) {
+  if (!booking.date) return null;
+  const artist = booking.artist && !isAnyArtist(booking.artist) ? booking.artist : '';
+  const start = booking.time ? timeToMinutes(booking.time) : null;
+  const duration = Number(service.duration || booking.duration || 0) || Number(config?.settings?.slot_minutes || 30);
+  const end = start === null ? null : start + duration;
+  const holidays = (config.specials || []).filter((special) => (
+    special.date === booking.date
+    && special.type === '休假'
+    && (special.artist === '全店' || !artist || special.artist === artist)
+  ));
+  if (!holidays.length) return null;
+  const fullDay = holidays.find((special) => Number(special.start || 0) <= 0 && Number(special.end || 0) >= 24 * 60);
+  if (fullDay) return fullDay;
+  if (start === null || end === null) return holidays[0];
+  return holidays.find((special) => start < Number(special.end || 0) && end > Number(special.start || 0)) || null;
+}
+
+function withNoSlotActions(message) {
+  return [
+    message,
+    '',
+    '1. 選擇其他日期',
+    '2. 選擇其他時段',
+    '3. 選擇其他美甲師',
+    restartOptionLine(),
+  ].join('\n');
 }
 
 function isSlotRefinementText(text, session) {
@@ -842,7 +1389,7 @@ function applySlotRefinementText(text, session, localBooking = {}) {
 
 function findAvailableStartSlots(slots, booking, service, settings, ignoreBookingId = '') {
   const starts = slots.filter((slot) => {
-    if (booking.artist && slot.artist !== booking.artist) return false;
+    if (booking.artist && !isAnyArtist(booking.artist) && slot.artist !== booking.artist) return false;
     if (booking.date && slot.date !== booking.date) return false;
     if (!isFutureEnough(slot, settings)) return false;
     if (booking.period && !isInPeriod(slot.time, booking.period)) return false;
@@ -866,7 +1413,7 @@ function findFirstAvailableSlotAtRequestedTime(slots, booking, service, settings
   if (!booking.time) return null;
   return slots
     .filter((slot) => {
-      if (booking.artist && slot.artist !== booking.artist) return false;
+      if (booking.artist && !isAnyArtist(booking.artist) && slot.artist !== booking.artist) return false;
       if (slot.time !== booking.time) return false;
       if (!isFutureEnough(slot, settings)) return false;
       return isSlotOpenForBooking(slot, ignoreBookingId);
@@ -898,7 +1445,7 @@ function findConsecutiveSlots(slots, booking, service, settings, ignoreBookingId
 }
 
 function isSlotOpenForBooking(slot, ignoreBookingId = '') {
-  if (slot.status === '可預約' && !slot.lockedBookingId) return true;
+  if (['可預約', '可約', 'available', 'open'].includes(String(slot.status || '').trim()) && !slot.lockedBookingId) return true;
   return Boolean(ignoreBookingId && slot.lockedBookingId && String(slot.lockedBookingId) === String(ignoreBookingId));
 }
 
@@ -990,12 +1537,12 @@ async function handleComplexOrMultiPersonRequest({ userId, text, session, config
     mentionedArtists.length ? `美甲師：${mentionedArtists.join('、')}` : '',
   ].filter(Boolean).join('\n');
 
-  notifyShopIfEnabled(config, 'pending', [
+  notifyShop([
     '需要店家確認的預約需求',
     `客人來源：${userId}`,
     `訊息：${text}`,
     requested,
-  ].filter(Boolean).join('\n')).catch((error) => {
+  ].filter(Boolean).join('\n'), config, 'pending').catch((error) => {
     console.error('notifyShop failed:', error.response?.data || error.message);
   });
 
@@ -1054,6 +1601,8 @@ function answerArtistStatusQuery(text, config, local) {
     `${formatFriendlyDateTime(date, time)} 的美甲師狀態：`,
     ...lines,
     '如果想預約，請告訴我服務項目。',
+    '',
+    buildServiceOptions(config),
   ].join('\n');
 }
 
@@ -1128,6 +1677,8 @@ function answerAvailabilityQuery(text, config, session, local) {
       `目前沒有找到「${artistName}」這位美甲師。`,
       `目前可接單的美甲師有：${config.artists.map((artist) => artist.name).join('、')}。`,
       '請問想預約哪一項服務？我會依服務時間幫您確認完整時段。',
+      '',
+      buildServiceOptions(config),
     ].join('\n');
   }
 
@@ -1145,6 +1696,8 @@ function answerAvailabilityQuery(text, config, session, local) {
     `${date} 可預約狀況：`,
     ...lines,
     '請問想做哪一項服務？我會依服務時間幫您確認完整時段。',
+    '',
+    buildServiceOptions(config),
   ].join('\n');
 }
 
@@ -1161,6 +1714,12 @@ async function handleRescheduleFlow({ userId, text, ai, local, session, config }
     ].join('\n');
   }
 
+  if (session.step === 'reschedule_confirm' && isAbortRescheduleText(text)) {
+    sessions.delete(userId);
+    session.step = 'start';
+    return buildRestartMessage();
+  }
+
   if (session.step === 'reschedule_confirm' && isConfirmRescheduleText(text)) {
     const draft = session.rescheduleDraft;
     if (!draft) {
@@ -1169,7 +1728,7 @@ async function handleRescheduleFlow({ userId, text, ai, local, session, config }
     }
     try {
       const result = await rescheduleBooking(userId, draft);
-      notifyShopIfEnabled(config, 'reschedule', `預約已修改 ${result.bookingId}\n客人：${result.customerName}\n服務：${result.service}\n美甲師：${result.artist}\n時間：${result.date} ${result.time}`).catch((error) => {
+      notifyShop(`預約已修改 ${result.bookingId}\n客人：${result.customerName}\n服務：${result.service}\n美甲師：${result.artist}\n時間：${result.date} ${result.time}`, config, 'reschedule').catch((error) => {
         console.error('notifyShop failed:', error.response?.data || error.message);
       });
       sessions.delete(userId);
@@ -1258,8 +1817,9 @@ async function handleRescheduleFlow({ userId, text, ai, local, session, config }
     session.step = 'reschedule_change';
     const suggestions = findAvailableStartSlots(config.slots, { artist: next.artist, date: next.date, period: change.period || '' }, service, config.settings, booking.id).slice(0, 6);
     session.rescheduleSlotOptions = suggestions;
+    const reason = buildUnavailableReason(config, next, service);
     return [
-      `${next.date} ${next.time} 目前沒有足夠完成「${service.name}」的連續空檔。`,
+      reason || `${next.date} ${next.time} 目前沒有足夠完成「${service.name}」的連續空檔。`,
       suggestions.length ? '以下是附近可約時間：' : '請換其他日期或時段。',
       ...suggestions.map((slot, index) => `${index + 1}. ${slot.date} ${slot.time}｜${slot.artist}`),
       suggestions.length ? '請直接回覆編號，或輸入其他日期時間。' : '',
@@ -1274,7 +1834,9 @@ async function handleRescheduleFlow({ userId, text, ai, local, session, config }
     `原本：${booking.date} ${booking.start}｜${booking.artist}｜${booking.service}`,
     `改成：${next.date} ${next.time}｜${next.artist}｜${service.name}`,
     '',
-    '確認請回覆「確認修改」。',
+    '1. 確認修改',
+    '2. 取消修改',
+    '0. 回首頁',
   ].join('\n');
 }
 
@@ -1397,7 +1959,7 @@ function adjustAmbiguousTimeWithContext(booking, text, currentBooking = {}, sett
 
   const contextPeriod = booking.period || currentBooking?.period || '';
   const dayStartHour = Math.floor(timeToMinutes(settings.day_start_time || '10:00') / 60);
-  if (contextPeriod === 'afternoon' || contextPeriod === 'evening' || hour < dayStartHour) {
+  if ((['afternoon', 'evening'].includes(contextPeriod) && hour <= 6) || hour < dayStartHour) {
     hour += 12;
     booking.time = `${String(hour).padStart(2, '0')}:${minuteText || '00'}`;
   }
@@ -1508,6 +2070,10 @@ function isSettingEnabled(value) {
   return ['開啟', '是', 'true', '1', 'yes', 'on'].includes(String(value || '').trim().toLowerCase());
 }
 
+function isSettingDisabled(value) {
+  return ['關閉', '否', 'false', '0', 'no', 'off'].includes(String(value || '').trim().toLowerCase());
+}
+
 function mergeBookingData(target, source) {
   Object.entries(source || {}).forEach(([key, value]) => {
     if (value) target[key] = value;
@@ -1522,6 +2088,11 @@ function resetChosenTimeIfSearchChanged(current, incoming) {
 
 function isActiveBookingSession(session) {
   return Boolean(session?.booking?.service || session?.booking?.artist || session?.booking?.date || session?.booking?.time || session?.step?.startsWith('ask_') || session?.step === 'confirm_booking');
+}
+
+function isFastRestartText(text) {
+  const normalized = String(text || '').trim();
+  return normalized === '0' || isResetText(normalized);
 }
 
 function isRestartOptionNumber(text, session) {
@@ -1565,6 +2136,8 @@ function isStepOptionNumber(text, session) {
 
 async function handleOptionNumberSelection({ userId, profile, text, session, config }) {
   const beforeStep = session.step;
+  const noSlotActionAnswer = handleNoSlotAction(text, session, config);
+  if (noSlotActionAnswer) return noSlotActionAnswer;
   applyQuickReplyNumber(text, session, config);
 
   if (beforeStep === 'ask_service' && session.step === 'ask_service_detail' && !session.booking.service) {
@@ -1579,7 +2152,9 @@ async function handleOptionNumberSelection({ userId, profile, text, session, con
       `服務：${target.service}`,
       `美甲師：${target.artist}`,
       `時間：${target.date} ${target.start}`,
-      '確認取消請回覆「確認取消」。',
+      '1. 確認刪除',
+      '2. 取消刪除',
+      '0. 回首頁',
     ].join('\n');
   }
 
@@ -1598,20 +2173,41 @@ async function handleOptionNumberSelection({ userId, profile, text, session, con
   return runConversation({ userId, profile, text: '', ai: emptyAi(), session, config, local: { booking: {} } });
 }
 
+function handleNoSlotAction(text, session, config) {
+  const choice = String(text || '').trim();
+  if (!['1', '2', '3'].includes(choice)) return '';
+  if (session.step !== 'ask_time') return '';
+  const service = findService(config.services, session.booking?.service);
+  if (!service || !session.booking?.date || !session.booking?.period || !session.booking?.artist) return '';
+  const slots = findAvailableStartSlots(config.slots, session.booking, service, config.settings);
+  if (slots.length) return '';
+
+  session.booking.time = '';
+  if (choice === '1') {
+    session.booking.date = '';
+    session.booking.period = '';
+    session.booking.artist = '';
+    session.step = 'ask_time';
+    return buildAvailableSlots(config, session.booking.artist, service, session.booking);
+  }
+  if (choice === '2') {
+    session.booking.period = '';
+    session.step = 'ask_time';
+    return buildAvailableSlots(config, session.booking.artist, service, session.booking);
+  }
+  session.booking.artist = '';
+  session.step = 'ask_artist';
+  return buildArtistOptions(config, service, session.booking);
+}
+
 function applyQuickReplyNumber(text, session, config) {
   if (!/^\d+$/.test(text.trim())) return;
   if (text.trim() === '0') return;
   const index = Number(text.trim()) - 1;
   if (session.step === 'ask_service') {
-    const group = buildServiceGroups(config.services)[index];
-    if (!group) return;
-    if (group.services.length === 1) {
-      session.booking.service = group.services[0].name;
-      session.pendingServiceGroup = null;
-      return;
-    }
-    session.pendingServiceGroup = group;
-    session.step = 'ask_service_detail';
+    const service = (config.services || []).slice(0, 12)[index];
+    if (service) session.booking.service = service.name;
+    session.pendingServiceGroup = null;
     return;
   }
   if (session.step === 'ask_service_detail' && session.pendingServiceGroup?.services?.[index]) {
@@ -1621,12 +2217,33 @@ function applyQuickReplyNumber(text, session, config) {
   }
   if (session.step === 'ask_artist') {
     const service = findService(config.services, session.booking.service);
-    const artists = service ? artistsForService(config.artists, service) : config.artists;
-    if (artists[index]) session.booking.artist = artists[index].name;
+    const artists = service ? getAvailableArtistsForBooking(config, service, session.booking) : (config.artists || []).slice(0, 3);
+    if (index === artists.length) {
+      session.booking.artist = ANY_ARTIST;
+    } else if (artists[index]) {
+      session.booking.artist = artists[index].name;
+    }
   }
   if (session.step === 'ask_time') {
     const service = findService(config.services, session.booking.service);
     if (!service) return;
+    if (!session.booking.date) {
+      const date = getAvailableDateOptions(config, session.booking.artist, service, session.booking).slice(0, 5)[index];
+      if (date) {
+        session.booking.date = date;
+        session.booking.period = '';
+        session.booking.time = '';
+      }
+      return;
+    }
+    if (!session.booking.period) {
+      const period = getAvailablePeriodOptions(config, session.booking.artist, service, session.booking)[index];
+      if (period) {
+        session.booking.period = period;
+        session.booking.time = '';
+      }
+      return;
+    }
     const slots = findAvailableStartSlots(config.slots, session.booking, service, config.settings);
     if (slots[index]) {
       session.booking.artist = slots[index].artist;
@@ -1810,16 +2427,33 @@ async function getLineProfile(userId) {
   }
 }
 
-async function notifyShop(text) {
+async function notifyShop(text, config, type = 'general') {
   const notifyId = process.env.SHOP_NOTIFY_LINE_ID;
   if (!notifyId) return;
+  if (!shouldNotifyShop(config?.settings, type)) return;
   await lineClient.pushMessage({ to: notifyId, messages: [{ type: 'text', text }] });
 }
 
+function shouldNotifyShop(settings = {}, type = 'general') {
+  if (isSettingDisabled(settings.notify_shop_enabled)) return false;
+  const keyByType = {
+    new: 'notify_new_booking',
+    cancel: 'notify_cancel_booking',
+    reschedule: 'notify_reschedule_booking',
+    pending: 'notify_pending_request',
+  };
+  const key = keyByType[type];
+  if (!key) return true;
+  return !isSettingDisabled(settings[key]);
+}
+
 async function replyText(replyToken, text) {
+  const message = { type: 'text', text: String(text).slice(0, 4500) };
+  const quickReply = buildQuickReplyFromText(text);
+  if (quickReply) message.quickReply = quickReply;
   await lineClient.replyMessage({
     replyToken,
-    messages: [{ type: 'text', text: String(text).slice(0, 4500) }],
+    messages: [message],
   });
 }
 
@@ -1829,14 +2463,62 @@ async function safeReplyText(event, userId, text) {
   } catch (error) {
     console.error('replyText failed, trying pushMessage:', error.response?.data || error.message);
     if (userId && userId.startsWith('U')) {
+      const message = { type: 'text', text: String(text).slice(0, 4500) };
+      const quickReply = buildQuickReplyFromText(text);
+      if (quickReply) message.quickReply = quickReply;
       await lineClient.pushMessage({
         to: userId,
-        messages: [{ type: 'text', text: String(text).slice(0, 4500) }],
+        messages: [message],
       });
     } else {
       throw error;
     }
   }
+}
+
+function buildQuickReplyFromText(text) {
+  const items = String(text || '')
+    .split('\n')
+    .map((line) => line.trim().match(/^(\d+)\.\s*(.+)$/))
+    .filter(Boolean)
+    .slice(0, 13)
+    .map((match) => ({
+      type: 'action',
+      action: {
+        type: 'message',
+        label: truncateQuickReplyLabel(addQuickReplyEmoji(toQuickReplyLabel(match[2]))),
+        text: match[1],
+      },
+    }));
+  return items.length ? { items } : null;
+}
+
+function toQuickReplyLabel(label) {
+  const text = String(label || '').trim();
+  return text.replace(/\s+\d+\s*分(?:\s+.*)?$/, '').trim();
+}
+
+function addQuickReplyEmoji(label) {
+  const text = String(label || '').trim();
+  if (/^[\p{Emoji_Presentation}\p{Extended_Pictographic}]/u.test(text)) return text;
+  if (text.includes('確認')) return `✅ ${text}`;
+  if (text.includes('預約')) return `📅 ${text}`;
+  if (text.includes('修改') || text.includes('改時間')) return `✏️ ${text}`;
+  if (text.includes('取消')) return `❌ ${text}`;
+  if (text.includes('重新開始')) return `🏠 ${text}`;
+  if (text === ANY_ARTIST) return `🙋 ${text}`;
+  if (/卸甲|保養|凝膠|延甲|款式|簡易服務/.test(text)) return `💅 ${text}`;
+  if (/上午|早上/.test(text)) return `🌤️ ${text}`;
+  if (/下午/.test(text)) return `☀️ ${text}`;
+  if (/晚上/.test(text)) return `🌙 ${text}`;
+  if (/^\d{4}-\d{2}-\d{2}|^\d{1,2}\/\d{1,2}|週|星期|明天|今天/.test(text)) return `📆 ${text}`;
+  if (/\d{1,2}:\d{2}/.test(text)) return `🕒 ${text}`;
+  return `💅 ${text}`;
+}
+
+function truncateQuickReplyLabel(label) {
+  const text = String(label || '').replace(/\s+/g, ' ').trim();
+  return text.length > 20 ? `${text.slice(0, 19)}…` : text;
 }
 
 async function replyWithMemory(event, userId, session, text) {
@@ -1845,19 +2527,37 @@ async function replyWithMemory(event, userId, session, text) {
 }
 
 async function appsScriptRequest(action, data = {}) {
+  const timeout = Number(process.env.APPS_SCRIPT_TIMEOUT_MS || 60000);
   const response = await axios.post(
     requiredEnv('APPS_SCRIPT_WEB_APP_URL'),
     {
       action,
-      token: requiredEnv('APPS_SCRIPT_API_TOKEN'),
+      token: String(requiredEnv('APPS_SCRIPT_API_TOKEN')).trim(),
       ...data,
     },
-    { timeout: 20000 }
+    { timeout }
   );
   if (!response.data?.ok) {
     throw new Error(response.data?.error || `Apps Script action failed: ${action}`);
   }
   return response.data.data;
+}
+
+function safeJson(value) {
+  try {
+    return JSON.stringify(value);
+  } catch (_error) {
+    return String(value);
+  }
+}
+
+function formatErrorForLog(error) {
+  return {
+    message: error?.message || String(error),
+    status: error?.response?.status,
+    data: error?.response?.data,
+    stack: error?.stack,
+  };
 }
 
 function isBookingFarEnough(booking, settings) {
@@ -1931,15 +2631,23 @@ function isAbandonBookingText(text) {
 }
 
 function isConfirmBookingText(text) {
-  return ['888', '確認', '確認預約', '對', '沒錯', '可以'].includes(text.trim());
+  return ['1', '888', '確認', '確認預約', '✅ 確認預約', '對', '沒錯', '可以'].includes(text.trim());
 }
 
 function isConfirmCancelText(text) {
-  return ['確認取消', '確定取消', '取消沒錯'].includes(text.trim());
+  return ['1', '確認取消', '確定取消', '取消沒錯', '確認刪除', '確定刪除', '刪除沒錯'].includes(text.trim());
 }
 
 function isConfirmRescheduleText(text) {
-  return ['確認修改', '確定修改', '確認改期', '確認更改', '修改沒錯'].includes(text.trim());
+  return ['1', '確認修改', '確定修改', '確認改期', '確認更改', '修改沒錯'].includes(text.trim());
+}
+
+function isAbortRescheduleText(text) {
+  return ['2', '取消修改', '取消改期', '取消更改', '回首頁', '0'].includes(String(text || '').trim());
+}
+
+function isAbortCancelText(text) {
+  return ['2', '取消刪除', '取消取消', '保留預約', '回首頁', '0'].includes(String(text || '').trim());
 }
 
 function requiredEnv(name) {
