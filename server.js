@@ -1312,17 +1312,28 @@ function buildAvailableSlots(config, artist, service, booking = {}) {
   if (!booking.date) return buildDateOptions(config, artist, service, booking);
   if (!booking.period) return buildPeriodOptions(config, artist, service, booking);
   if (!artist) return buildArtistOptions(config, service, booking);
-  const candidates = findAvailableStartSlots(config.slots, { ...booking, artist }, service, config.settings).slice(0, 11);
+  const candidates = getTimeOptionSlots(config, { ...booking, artist }, service).slice(0, 11);
   if (!candidates.length) {
     logSlotDebug('time_options_empty', config, artist, service, booking, candidates);
     return buildNoAvailableSlotsMessage(config, artist, service, booking);
   }
+  const showArtist = !isAnyArtist(artist);
   return [
     `${isAnyArtist(artist) ? '不指定美甲師' : artist} 做「${service.name}」約 ${service.duration} 分鐘，${booking.date} ${periodLabel(booking.period)}可以預約以下時段：`,
-    ...candidates.map((slot, index) => `${index + 1}. ${slot.time}｜${slot.artist}`),
+    ...candidates.map((slot, index) => `${index + 1}. ${showArtist ? `${slot.time}｜${slot.artist}` : slot.time}`),
     restartOptionLine(),
     '請直接回覆上面的編號數字，或輸入您希望的日期與時間（例如：5/20 1600）。',
   ].join('\n');
+}
+
+function getTimeOptionSlots(config, booking, service) {
+  const slots = findAvailableStartSlots(config.slots, booking, service, config.settings);
+  if (!isAnyArtist(booking.artist)) return slots;
+  const byTime = new Map();
+  slots.forEach((slot) => {
+    if (!byTime.has(slot.time)) byTime.set(slot.time, slot);
+  });
+  return [...byTime.values()].sort(compareSlots);
 }
 
 function getBookableArtists(config, service) {
@@ -2388,7 +2399,7 @@ function applyQuickReplyNumber(text, session, config) {
       }
       return;
     }
-    const slots = findAvailableStartSlots(config.slots, session.booking, service, config.settings);
+    const slots = getTimeOptionSlots(config, session.booking, service);
     if (slots[index]) {
       session.booking.artist = slots[index].artist;
       session.booking.date = slots[index].date;
