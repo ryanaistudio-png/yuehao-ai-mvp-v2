@@ -1020,6 +1020,9 @@ function continueContactStep({ text, session, config }) {
     const name = String(text || '').replace(phone, '').replace(/[，,。.\s]+/g, '').trim();
     if (name) session.booking.customerName = name;
   } else if (/\d/.test(text)) {
+    if (isLikelyOptionOrTimeInput(text)) {
+      return '最後請留下姓名與手機，例如：王小美 0912345678。';
+    }
     session.booking.phone = '';
     return '手機號碼格式不正確，請留下 09 開頭的 10 碼手機號碼，例如：王小美 0912345678。';
   } else if (!session.booking.customerName) {
@@ -1058,6 +1061,11 @@ function isValidTaiwanMobile(phone) {
 function extractTaiwanMobile(text) {
   const match = String(text || '').match(/(?:^|[^\d])(09\d{8})(?!\d)/);
   return match?.[1] || '';
+}
+
+function isLikelyOptionOrTimeInput(text) {
+  const value = String(text || '').trim();
+  return /^\d{1,2}$/.test(value) || /^\d{1,2}[:：]\d{2}$/.test(value) || /^\d{3,4}$/.test(value);
 }
 
 async function loadConfig() {
