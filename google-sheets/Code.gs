@@ -214,10 +214,10 @@ function setupWeekView_(ss) {
   const sheet = ss.getSheetByName(SHEETS.week);
   resetSheetForLayout_(sheet);
   sheet.getRange(1, 1, 5, 8).setValues([
-    ['此表主要供查看。新增請到 02，修改/取消/延時請到 03。', '', '', '', '', '', '', ''],
+    ['說明', '此表主要供查看。新增請到 02，修改/取消/延時請到 03。', '', '', '', '', '', ''],
     ['查看週別', '本週', '手機可直接輸入：本週、下週、下下週', '', '', '', '', ''],
     ['預約編號', '', '要標記完成時填寫', '', '', '', '', ''],
-    ['手機操作', '未執行', '可輸入：更新預約畫面、套用 v3 安全版面、標記完成', '', '', '', '', ''],
+    ['手機操作', '未執行', '可輸入：更新預約畫面、修復表格、完成預約', '', '', '', '', ''],
     ['執行結果', '', '', '', '', '', '', ''],
   ]);
   sheet.getRange('A1:H1').setFontColor('#b91c1c').setFontWeight('bold').setBackground('#fee2e2');
@@ -493,10 +493,10 @@ function handleWeekCommand_(sheet) {
     if (command === '更新預約畫面') {
       refreshSystemData(false);
       sheet.getRange('B5').setValue('執行成功：已更新預約畫面。');
-    } else if (command === '套用 v3 安全版面') {
+    } else if (command === '修復表格' || command === '套用 v3 安全版面') {
       applyV3Layout();
-      ss.getSheetByName(SHEETS.week).getRange('B5').setValue('執行成功：已套用 v3 安全版面。');
-    } else if (command === '標記完成') {
+      ss.getSheetByName(SHEETS.week).getRange('B5').setValue('執行成功：已修復表格。');
+    } else if (command === '完成預約' || command === '標記完成') {
       const id = sheet.getRange('B3').getValue();
       markBookingCompleted_(ss, id);
       refreshSystemData(false);
@@ -1525,7 +1525,7 @@ function refreshDropdowns_() {
 function buildOptionRows_() {
   const cols = [
     ['週別', '本週', '下週', '下下週'],
-    ['完成指令', '未執行', '標記完成', '更新預約畫面', '套用 v3 安全版面'],
+    ['完成指令', '未執行', '完成預約', '更新預約畫面', '修復表格'],
     ['新增指令', '未執行', '執行現場新增', '更新預約畫面'],
     ['修改指令', '未執行', '載入預約', '修改預約', '延長時間', '取消預約', '更新預約畫面'],
     ['是否', '是', '否'],
