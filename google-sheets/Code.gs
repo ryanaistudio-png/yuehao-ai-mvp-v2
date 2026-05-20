@@ -278,7 +278,7 @@ function setupQuerySheet_(ss) {
   const sheet = ss.getSheetByName(SHEETS.query);
   resetSheetForLayout_(sheet);
   sheet.getRange(1, 1, 3, 11).setValues([
-    ['此表僅供查詢，請不要直接修改。新增到 02，修改/取消/延時到 03。', '', '', '', '', '', '', '', '', '', ''],
+    ['說明', '此表僅供查詢，請不要直接修改。新增到 02，修改/取消/延時到 03。', '', '', '', '', '', '', '', '', ''],
     ['查看月份', '全部', '', '查看狀態', '全部', '', '', '', '', '', ''],
     ['預約編號', '狀態', '服務日期', '開始時間', '結束時間', '美甲師', '服務', '客人姓名', '電話', '來源', '備註'],
   ]);
@@ -1143,9 +1143,10 @@ function buildWeekView_(ss) {
 
 function buildBookingQuery_(ss) {
   const sheet = ss.getSheetByName(SHEETS.query);
-  const month = String(sheet.getRange('B2').getValue() || '全部');
-  const status = String(sheet.getRange('E2').getValue() || '全部');
-  const rows = readBookings_(ss)
+  const month = String(sheet.getRange('B2').getValue() || '全部').trim() || '全部';
+  const status = String(sheet.getRange('E2').getValue() || '全部').trim() || '全部';
+  const bookings = readBookings_(ss);
+  const rows = bookings
     .filter((booking) => month === '全部' || `${new Date(booking.dateValue).getMonth() + 1}月` === month)
     .filter((booking) => status === '全部' || booking.status === status)
     .sort((a, b) => a.date.localeCompare(b.date) || a.startMinutes - b.startMinutes || a.artist.localeCompare(b.artist))
@@ -1155,6 +1156,7 @@ function buildBookingQuery_(ss) {
     ]);
   sheet.getRange('A4:K5000').clearContent();
   if (rows.length) sheet.getRange(4, 1, rows.length, 11).setValues(rows);
+  if (!rows.length) sheet.getRange('A4').setValue(`目前沒有符合條件的預約。05 資料庫共有 ${bookings.length} 筆預約；目前篩選：月份 ${month}、狀態 ${status}`);
   sheet.getRange('C4:C5000').setNumberFormat('yyyy-mm-dd');
   sheet.getRange('D4:E5000').setNumberFormat('hh:mm');
   sheet.getRange('I4:I5000').setNumberFormat('@');
