@@ -505,6 +505,20 @@ async function handleStaffFlow({ userId, text, session, config }) {
     return buildStaffMenu();
   }
 
+  if (text === '預約查詢') {
+    session.step = 'staff_query_menu';
+    return buildStaffQueryMenu();
+  }
+
+  if (text === '現場操作') {
+    session.step = 'staff_ops_menu';
+    return buildStaffOpsMenu();
+  }
+
+  if (isStaffBackText(text, session)) {
+    return goBackStaffMenu(session);
+  }
+
   if (text === '今日預約' || text === '1' && session.step === 'staff_menu') {
     session.step = 'staff_menu';
     const date = nowInZone().format('YYYY-MM-DD');
@@ -512,59 +526,85 @@ async function handleStaffFlow({ userId, text, session, config }) {
   }
 
   if (text === '2' && session.step === 'staff_menu') {
+    session.step = 'staff_query_menu';
+    return buildStaffQueryMenu();
+  }
+
+  if (text === '3' && session.step === 'staff_menu') {
+    session.step = 'staff_ops_menu';
+    return buildStaffOpsMenu();
+  }
+
+  if (text === '1' && session.step === 'staff_query_menu') {
     session.step = 'staff_menu';
     const date = nowInZone().add(1, 'day').format('YYYY-MM-DD');
     return buildStoreDateBookings(await loadStoreBookingsByDate(date), date, '明日預約');
   }
 
-  if (text === '3' && session.step === 'staff_menu') {
+  if (text === '2' && session.step === 'staff_query_menu') {
     session.step = 'staff_date_lookup';
-    return withStaffHomeAction('請輸入要查詢的日期，例如「查日期 5/20」或「明天」。');
+    session.staffParentMenu = 'query';
+    return withStaffBackAction('請輸入要查詢的日期，例如「5/20」或「明天」。');
   }
 
-  if (text === '4' && session.step === 'staff_menu') {
+  if (text === '3' && session.step === 'staff_query_menu') {
     session.step = 'staff_lookup';
-    return withStaffHomeAction('請輸入要查詢的預約編號，例如「查預約 001」。');
+    session.staffParentMenu = 'query';
+    return withStaffBackAction('請輸入要查詢的預約編號，例如「001」。');
   }
 
-  if (text === '5' && session.step === 'staff_menu') {
-    session.step = 'staff_reschedule_wait_id';
-    return withStaffHomeAction('請輸入要修改的預約編號，例如「修改 001」。');
-  }
-
-  if (text === '6' && session.step === 'staff_menu') {
-    session.step = 'staff_cancel_wait_id';
-    return withStaffHomeAction('請輸入要取消的預約編號，例如「取消 001」。');
-  }
-
-  if (text === '7' && session.step === 'staff_menu') {
+  if (text === '4' && session.step === 'staff_query_menu') {
     session.step = 'staff_customer_lookup';
-    return withStaffHomeAction('請輸入客人姓名或手機，例如「查客人 0912345678」或「查客人 王小美」。');
+    session.staffParentMenu = 'query';
+    return withStaffBackAction('請輸入客人姓名或手機，例如「0912345678」或「王小美」。');
   }
 
-  if (text === '8' && session.step === 'staff_menu') {
-    session.step = 'staff_availability_change';
-    session.staffAvailability = {};
-    return withStaffHomeAction('請輸入日期、服務與時段，例如「查空檔 5/21 單色 下午」。');
-  }
-
-  if (text === '9' && session.step === 'staff_menu') {
-    session.step = 'staff_add_change';
+  if (text === '1' && session.step === 'staff_ops_menu') {
+    session.step = 'staff_add_service';
+    session.staffParentMenu = 'ops';
     session.staffAddBooking = {};
-    return withStaffHomeAction('請輸入新增預約資料，例如「新增預約 5/21 16:00 單色 Amy 王小美 0912345678」。');
+    return buildStaffAddServiceOptions(config);
   }
 
-  if (text === '10' && session.step === 'staff_menu') {
+  if (text === '2' && session.step === 'staff_ops_menu') {
+    session.step = 'staff_availability_change';
+    session.staffParentMenu = 'ops';
+    session.staffAvailability = {};
+    return withStaffBackAction('請輸入日期、服務與時段，例如「5/21 單色 下午」。');
+  }
+
+  if (text === '3' && session.step === 'staff_ops_menu') {
     session.step = 'staff_extend_wait_id';
-    return withStaffHomeAction('請輸入要延時的預約編號與分鐘，例如「延時 001 30」。');
+    session.staffParentMenu = 'ops';
+    return withStaffBackAction('請輸入要延時的預約編號，例如「001」。');
+  }
+
+  if (text === '4' && session.step === 'staff_ops_menu') {
+    session.step = 'staff_reschedule_wait_id';
+    session.staffParentMenu = 'ops';
+    return withStaffBackAction('請輸入要修改的預約編號，例如「001」。');
+  }
+
+  if (text === '5' && session.step === 'staff_ops_menu') {
+    session.step = 'staff_cancel_wait_id';
+    session.staffParentMenu = 'ops';
+    return withStaffBackAction('請輸入要取消的預約編號，例如「001」。');
+  }
+
+  if (text === '查空檔') {
+    session.step = 'staff_availability_change';
+    session.staffParentMenu = 'ops';
+    session.staffAvailability = {};
+    return withStaffBackAction('請輸入日期、服務與時段，例如「5/21 單色 下午」。');
   }
 
   if (session.step === 'staff_cancel_confirm' && isConfirmCancelText(text)) {
     const booking = session.staffCancelBooking;
     if (!booking) {
       session.step = 'staff_menu';
-      return '取消資訊已過期，請重新輸入「取消 001」。';
+      return '取消資訊已過期，請回現場操作重新選擇。';
     }
+    await pushStaffProcessing(userId);
     const result = await storeCancelBooking(booking.id);
     session.step = 'staff_menu';
     session.staffCancelBooking = null;
@@ -580,8 +620,9 @@ async function handleStaffFlow({ userId, text, session, config }) {
     const draft = session.staffRescheduleDraft;
     if (!draft) {
       session.step = 'staff_reschedule_wait_id';
-      return '修改資訊已過期，請重新輸入「修改 001」。';
+      return '修改資訊已過期，請回現場操作重新選擇。';
     }
+    await pushStaffProcessing(userId);
     const result = await storeRescheduleBooking(draft);
     session.step = 'staff_menu';
     session.staffBooking = null;
@@ -614,10 +655,17 @@ async function handleStaffFlow({ userId, text, session, config }) {
     if (session.staffPendingAction === 'extend') return beginStaffExtend(session, selectedBooking);
   }
 
+  if (session.step === 'staff_booking_actions') {
+    if (text === '1') return beginStaffReschedule(session, session.staffBooking);
+    if (text === '2') return beginStaffExtend(session, session.staffBooking);
+    if (text === '3') return beginStaffCancel(session, session.staffBooking);
+    return withStaffBackAction('請選擇要進行的操作。');
+  }
+
   const dateLookup = parseStaffDateLookup(text, session);
   if (dateLookup || session.step === 'staff_date_lookup') {
     const date = dateLookup || parseDateText(text);
-    if (!date) return withStaffHomeAction('請輸入要查詢的日期，例如「查日期 5/20」或「明天」。');
+    if (!date) return withStaffBackAction('請輸入要查詢的日期，例如「5/20」或「明天」。');
     session.step = 'staff_date_lookup';
     return buildStoreDateBookings(await loadStoreBookingsByDate(date), date);
   }
@@ -625,17 +673,23 @@ async function handleStaffFlow({ userId, text, session, config }) {
   const lookupId = /^查預約/.test(text) ? normalizeShortBookingInput(text) : '';
   if (lookupId || session.step === 'staff_lookup') {
     const bookingId = lookupId || normalizeShortBookingInput(text);
-    if (!bookingId) return withStaffHomeAction('請輸入要查詢的預約編號，例如「查預約 001」。');
+    if (!bookingId) return withStaffBackAction('請輸入要查詢的預約編號，例如「001」。');
     const booking = await tryLoadStoreBooking(bookingId, session, 'lookup');
-    if (!booking.ok) return withStaffHomeAction(booking.message);
+    if (!booking.ok) return withStaffBackAction(booking.message);
     return finishStaffLookup(session, booking.data);
   }
 
   const customerQuery = /^查客人/.test(text) ? text.replace(/^查客人/, '').trim() : '';
-  if (customerQuery || session.step === 'staff_customer_lookup') {
-    const query = customerQuery || text.trim();
-    if (!query) return withStaffHomeAction('請輸入客人姓名或手機，例如「查客人 0912345678」。');
+  const babyQuery = /^寶寶查詢/.test(text) ? text.replace(/^寶寶查詢/, '').trim() : '';
+  if (customerQuery || babyQuery || text === '寶寶查詢' || session.step === 'staff_customer_lookup') {
+    const query = customerQuery || babyQuery || (text === '寶寶查詢' ? '' : text.trim());
+    if (!query) {
+      session.step = 'staff_customer_lookup';
+      session.staffParentMenu = 'query';
+      return withStaffBackAction('請輸入客人姓名或手機，例如「0912345678」或「王小美」。');
+    }
     session.step = 'staff_customer_lookup';
+    session.staffParentMenu = 'query';
     return formatStoreCustomerBookings(await searchStoreCustomerBookings(query), query);
   }
 
@@ -643,15 +697,24 @@ async function handleStaffFlow({ userId, text, session, config }) {
     return handleStaffAvailability({ text: text.replace(/^查空檔/, '').trim(), session, config });
   }
 
-  if (/^新增預約/.test(text) || session.step === 'staff_add_change' || session.step === 'staff_add_confirm') {
-    return handleStaffAddBooking({ text: text.replace(/^新增預約/, '').trim(), session, config });
+  if (text === '新增預約') {
+    session.step = 'staff_add_service';
+    session.staffParentMenu = 'ops';
+    session.staffAddBooking = {};
+    return buildStaffAddServiceOptions(config);
+  }
+
+  if (/^新增預約/.test(text) || session.step === 'staff_add_change' || session.step === 'staff_add_confirm'
+    || ['staff_add_service', 'staff_add_date', 'staff_add_period', 'staff_add_time', 'staff_add_contact'].includes(session.step)) {
+    return handleStaffAddBooking({ userId, text: text.replace(/^新增預約/, '').trim(), session, config });
   }
 
   if (session.step === 'staff_extend_confirm' && isConfirmRescheduleText(text)) {
     const booking = session.staffExtendBooking;
     const minutes = session.staffExtendMinutes;
-    if (!booking || !minutes) return withStaffHomeAction('延時資訊已過期，請重新輸入「延時 001 30」。');
+    if (!booking || !minutes) return withStaffBackAction('延時資訊已過期，請回上一層重新選擇。');
     try {
+      await pushStaffProcessing(userId);
       const result = await storeExtendBooking(booking.id, minutes);
       resetStaffSession(session);
       return withStaffHomeAction([
@@ -670,6 +733,12 @@ async function handleStaffFlow({ userId, text, session, config }) {
     return buildStaffMenu();
   }
 
+  if (text === '延時') {
+    session.step = 'staff_extend_wait_id';
+    session.staffParentMenu = 'ops';
+    return withStaffBackAction('請輸入要延時的預約編號，例如「001」。');
+  }
+
   const extendId = /^延時\s*\d+|^延時\s*預約\s*\d+/.test(text) ? normalizeShortBookingInput(text) : '';
   if (extendId || session.step === 'staff_extend_wait_id' || session.step === 'staff_extend_minutes') {
     return handleStaffExtend({ text, session });
@@ -678,7 +747,7 @@ async function handleStaffFlow({ userId, text, session, config }) {
   const cancelId = /^取消\s*\d+|^取消\s*預約\s*\d+/.test(text) ? normalizeShortBookingInput(text) : '';
   if (cancelId || session.step === 'staff_cancel_wait_id') {
     const bookingId = cancelId || normalizeShortBookingInput(text);
-    if (!bookingId) return withStaffHomeAction('請輸入要取消的預約編號，例如「取消 001」。');
+    if (!bookingId) return withStaffBackAction('請輸入要取消的預約編號，例如「001」。');
     const loaded = await tryLoadStoreBooking(bookingId, session, 'cancel');
     if (!loaded.ok) return withStaffHomeAction(loaded.message);
     return beginStaffCancel(session, loaded.data);
@@ -687,7 +756,7 @@ async function handleStaffFlow({ userId, text, session, config }) {
   const modifyId = /^修改\s*\d+|^修改\s*預約\s*\d+/.test(text) ? normalizeShortBookingInput(text) : '';
   if (modifyId || session.step === 'staff_reschedule_wait_id') {
     const bookingId = modifyId || normalizeShortBookingInput(text);
-    if (!bookingId) return withStaffHomeAction('請輸入要修改的預約編號，例如「修改 001」。');
+    if (!bookingId) return withStaffBackAction('請輸入要修改的預約編號，例如「001」。');
     const loaded = await tryLoadStoreBooking(bookingId, session, 'reschedule');
     if (!loaded.ok) return withStaffHomeAction(loaded.message);
     return beginStaffReschedule(session, loaded.data);
@@ -715,14 +784,14 @@ async function tryLoadStoreBooking(bookingId, session = null, pendingAction = ''
     return { ok: true, data: await loadStoreBooking(bookingId) };
   } catch (error) {
     if (isExpectedBookingLookupError(error)) {
-      return { ok: false, message: `${error.message}\n請確認編號後再試一次，例如「查預約 001」。` };
+      return { ok: false, message: `${error.message}\n請確認編號後再試一次，例如「001」。` };
     }
     throw error;
   }
 }
 
 function buildBookingCandidateOptions(bookings, input) {
-  return withStaffHomeAction([
+  return withStaffBackAction([
     `短編號 ${normalizeShortBookingInput(input)} 找到多筆預約，請選擇：`,
     ...bookings.map((booking, index) => `${index + 1}. ${booking.id}｜${booking.date} ${booking.start}｜${booking.artist}｜${booking.service}｜${booking.customer}`),
   ].join('\n'));
@@ -738,14 +807,23 @@ function pickStaffBookingOption(text, session) {
 }
 
 function finishStaffLookup(session, booking) {
-  session.step = 'staff_menu';
+  session.step = 'staff_booking_actions';
   session.staffPendingAction = null;
-  return withStaffHomeAction(formatStoreBooking(booking));
+  session.staffParentMenu = 'query';
+  session.staffBooking = booking;
+  return withStaffBackAction([
+    formatStoreBooking(booking),
+    '',
+    '1. 修改',
+    '2. 延時',
+    '3. 取消',
+  ].join('\n'));
 }
 
 function beginStaffCancel(session, booking) {
   session.step = 'staff_cancel_confirm';
   session.staffPendingAction = null;
+  session.staffParentMenu = 'ops';
   session.staffCancelBooking = booking;
   return [
     '請確認是否取消這筆預約：',
@@ -753,6 +831,7 @@ function beginStaffCancel(session, booking) {
     '',
     '1. 確認刪除',
     '2. 取消刪除',
+    '9. 回上一層',
     '0. 店家模式',
   ].join('\n');
 }
@@ -760,9 +839,10 @@ function beginStaffCancel(session, booking) {
 function beginStaffReschedule(session, booking) {
   session.step = 'staff_reschedule_change';
   session.staffPendingAction = null;
+  session.staffParentMenu = 'ops';
   session.staffBooking = booking;
   session.staffChange = {};
-  return withStaffHomeAction([
+  return withStaffBackAction([
     '我找到這筆預約：',
     formatStoreBooking(booking),
     '',
@@ -773,8 +853,9 @@ function beginStaffReschedule(session, booking) {
 function beginStaffExtend(session, booking) {
   session.step = 'staff_extend_minutes';
   session.staffPendingAction = null;
+  session.staffParentMenu = 'ops';
   session.staffExtendBooking = booking;
-  return withStaffHomeAction([
+  return withStaffBackAction([
     '我找到這筆預約：',
     formatStoreBooking(booking),
     '',
@@ -791,8 +872,11 @@ function isStaffCommandText(text, session) {
   if (session.step?.startsWith('staff_')) return true;
   return text === '店家'
     || text === '店家模式'
+    || text === '預約查詢'
+    || text === '現場操作'
     || text === '今日預約'
     || text === '明日預約'
+    || text === '寶寶查詢'
     || text === '查客人'
     || text === '查空檔'
     || text === '新增預約'
@@ -800,6 +884,7 @@ function isStaffCommandText(text, session) {
     || Boolean(parseDateText(text))
     || /^查日期/.test(text)
     || /^查預約\s*\d+/.test(text)
+    || /^寶寶查詢\s+/.test(text)
     || /^查客人\s+/.test(text)
     || /^查空檔/.test(text)
     || /^新增預約/.test(text)
@@ -820,10 +905,31 @@ function resetStaffSession(session) {
   session.staffAddBooking = null;
   session.staffExtendBooking = null;
   session.staffExtendMinutes = null;
+  session.staffParentMenu = null;
 }
 
 function isStaffHomeText(text) {
   return ['0', '店家模式', '回店家模式', '回首頁', '取消修改', '取消刪除', '取消', '不用了'].includes(String(text || '').trim());
+}
+
+function isStaffBackText(text, session) {
+  const value = String(text || '').trim();
+  return (value === '9' && session.step !== 'staff_menu' && session.step !== 'staff_query_menu' && session.step !== 'staff_ops_menu')
+    || value === '回上一層';
+}
+
+function goBackStaffMenu(session) {
+  if (session.staffParentMenu === 'ops' || [
+    'staff_add_service', 'staff_add_date', 'staff_add_period', 'staff_add_time', 'staff_add_contact',
+    'staff_extend_wait_id', 'staff_extend_minutes', 'staff_extend_confirm',
+    'staff_reschedule_wait_id', 'staff_reschedule_change', 'staff_reschedule_confirm',
+    'staff_cancel_wait_id', 'staff_cancel_confirm',
+  ].includes(session.step)) {
+    session.step = 'staff_ops_menu';
+    return buildStaffOpsMenu();
+  }
+  session.step = 'staff_query_menu';
+  return buildStaffQueryMenu();
 }
 
 function isStaffUser(userId) {
@@ -840,15 +946,31 @@ function buildStaffMenu() {
   return [
     '店家模式',
     '1. 今日預約',
-    '2. 明日預約',
-    '3. 查日期',
-    '4. 查預約',
-    '5. 修改預約',
-    '6. 取消預約',
-    '7. 查客人',
-    '8. 查空檔',
-    '9. 新增預約',
-    '10. 延時',
+    '2. 預約查詢',
+    '3. 現場操作',
+  ].join('\n');
+}
+
+function buildStaffQueryMenu() {
+  return [
+    '預約查詢',
+    '1. 明日預約',
+    '2. 查日期',
+    '3. 查預約',
+    '4. 寶寶查詢',
+    '0. 店家模式',
+  ].join('\n');
+}
+
+function buildStaffOpsMenu() {
+  return [
+    '現場操作',
+    '1. 新增預約',
+    '2. 查空檔',
+    '3. 延時',
+    '4. 修改預約',
+    '5. 取消預約',
+    '0. 店家模式',
   ].join('\n');
 }
 
@@ -882,6 +1004,14 @@ function withStaffHomeAction(message) {
   return `${text}\n0. 店家模式`;
 }
 
+function withStaffBackAction(message) {
+  const text = String(message || '').trimEnd();
+  const lines = [text];
+  if (!text.includes('9. 回上一層')) lines.push('9. 回上一層');
+  if (!text.includes('0. 店家模式')) lines.push('0. 店家模式');
+  return lines.filter(Boolean).join('\n');
+}
+
 function formatStoreBooking(booking) {
   return [
     `預約編號：${shortBookingId(booking.id)}號`,
@@ -898,7 +1028,7 @@ function handleStaffRescheduleChange({ text, session, config }) {
   const booking = session.staffBooking;
   if (!booking) {
     session.step = 'staff_reschedule_wait_id';
-    return '修改資訊已過期，請重新輸入「修改 001」。';
+    return withStaffBackAction('修改資訊已過期，請回上一層重新選擇。');
   }
   if (/^\d+$/.test(text.trim()) && Array.isArray(session.staffSlotOptions)) {
     const slot = session.staffSlotOptions[Number(text.trim()) - 1];
@@ -955,6 +1085,7 @@ function handleStaffRescheduleChange({ text, session, config }) {
     '',
     '1. 確認修改',
     '2. 取消修改',
+    '9. 回上一層',
     '0. 店家模式',
   ].join('\n');
 }
@@ -967,7 +1098,7 @@ function buildStaffRescheduleSlotOptions({ config, session, booking, next, chang
   }, service, config.settings, booking.id).slice(0, 6);
   session.staffSlotOptions = suggestions;
   const reason = buildUnavailableReason(config, { ...next, time: requestedTime || next.time }, service);
-  return withStaffHomeAction([
+  return withStaffBackAction([
     reason || `${next.date || '指定日期'} ${next.time || ''} 目前沒有足夠完成「${service.name}」的連續空檔。`,
     suggestions.length ? '可改約以下時段：' : '請換日期、時段或美甲師。',
     ...suggestions.map((slot, index) => `${index + 1}. ${slot.date} ${slot.time}｜${slot.artist}`),
@@ -975,8 +1106,8 @@ function buildStaffRescheduleSlotOptions({ config, session, booking, next, chang
 }
 
 function formatStoreCustomerBookings(bookings, query) {
-  if (!bookings.length) return withStaffHomeAction(`查不到「${query}」的預約紀錄。`);
-  return withStaffHomeAction([
+  if (!bookings.length) return withStaffBackAction(`查不到「${query}」的預約紀錄。`);
+  return withStaffBackAction([
     `「${query}」相關預約：`,
     ...bookings.map((booking) => `${shortBookingId(booking.id)}｜${booking.status}｜${booking.date} ${booking.start}｜${booking.artist}｜${booking.service}｜${booking.customer}｜${booking.phone}`),
   ].join('\n'));
@@ -990,9 +1121,9 @@ function handleStaffAvailability({ text, session, config }) {
   const service = findService(config.services, query.service);
   if (!query.date || !service) {
     session.step = 'staff_availability_change';
-    return withStaffHomeAction([
+    return withStaffBackAction([
       '請輸入查空檔條件，至少要有日期與服務。',
-      '例如：查空檔 5/21 單色 下午',
+      '例如：5/21 單色 下午',
     ].join('\n'));
   }
   const slots = findAvailableStartSlots(config.slots, {
@@ -1003,9 +1134,9 @@ function handleStaffAvailability({ text, session, config }) {
   const grouped = groupStaffAvailabilitySlots(slots).slice(0, 12);
   session.step = 'staff_availability_change';
   if (!grouped.length) {
-    return withStaffHomeAction(`${formatDateWithWeekday(query.date)} 目前沒有可完成「${service.name}」的空檔。`);
+    return withStaffBackAction(`${formatDateWithWeekday(query.date)} 目前沒有可完成「${service.name}」的空檔。`);
   }
-  return withStaffHomeAction([
+  return withStaffBackAction([
     `${formatDateWithWeekday(query.date)}「${service.name}」可約空檔：`,
     ...grouped.map((item, index) => `${index + 1}. ${item.time}｜${item.artists.join('、')}`),
   ].join('\n'));
@@ -1020,12 +1151,114 @@ function groupStaffAvailabilitySlots(slots = []) {
   return [...byTime.values()];
 }
 
-async function handleStaffAddBooking({ text, session, config }) {
+function buildStaffAddServiceOptions(config) {
+  const services = (config.services || []).slice(0, 10);
+  return withStaffBackAction([
+    '請選擇服務項目：',
+    ...services.map((service, index) => `${index + 1}. ${formatServiceMenuName(service)}`),
+  ].join('\n'));
+}
+
+function buildStaffAddDateOptions(config, draft, service) {
+  const dates = getAvailableDateOptions(config, ANY_ARTIST, service, draft).slice(0, 5);
+  return withStaffBackAction([
+    '請選擇預約日期：',
+    ...dates.map((date, index) => `${index + 1}. ${formatDateWithWeekday(date)}`),
+  ].join('\n'));
+}
+
+function buildStaffAddPeriodOptions(config, draft, service) {
+  const periods = getAvailablePeriodOptions(config, ANY_ARTIST, service, draft);
+  return withStaffBackAction([
+    '請選擇時段：',
+    ...periods.map((period, index) => `${index + 1}. ${periodLabel(period)}`),
+  ].join('\n'));
+}
+
+function buildStaffAddTimeOptions(config, session, draft, service) {
+  const slots = findAvailableStartSlots(config.slots, {
+    artist: ANY_ARTIST,
+    date: draft.date,
+    period: draft.period || '',
+  }, service, config.settings).slice(0, 12);
+  session.staffSlotOptions = slots;
+  if (!slots.length) return withStaffBackAction('這個日期與時段目前沒有足夠空檔，請回上一層改日期或時段。');
+  return withStaffBackAction([
+    '請選擇可預約時間：',
+    ...slots.map((slot, index) => `${index + 1}. ${slot.time}｜${slot.artist}`),
+  ].join('\n'));
+}
+
+async function handleStaffAddBooking({ userId, text, session, config }) {
+  session.staffAddBooking = session.staffAddBooking || {};
+  const draft = session.staffAddBooking;
+
+  if (session.step === 'staff_add_service') {
+    const services = (config.services || []).slice(0, 10);
+    const selected = services[Number(text.trim()) - 1] || findService(config.services, text);
+    if (!selected) return buildStaffAddServiceOptions(config);
+    draft.service = selected.name;
+    session.step = 'staff_add_date';
+    return buildStaffAddDateOptions(config, draft, selected);
+  }
+
+  if (session.step === 'staff_add_date') {
+    const service = findService(config.services, draft.service);
+    const dates = getAvailableDateOptions(config, ANY_ARTIST, service, draft).slice(0, 5);
+    draft.date = dates[Number(text.trim()) - 1] || parseDateText(text);
+    if (!draft.date) return buildStaffAddDateOptions(config, draft, service);
+    session.step = 'staff_add_period';
+    return buildStaffAddPeriodOptions(config, draft, service);
+  }
+
+  if (session.step === 'staff_add_period') {
+    const service = findService(config.services, draft.service);
+    const periods = getAvailablePeriodOptions(config, ANY_ARTIST, service, draft);
+    draft.period = periods[Number(text.trim()) - 1] || parsePeriodText(text);
+    if (!draft.period) return buildStaffAddPeriodOptions(config, draft, service);
+    session.step = 'staff_add_time';
+    return buildStaffAddTimeOptions(config, session, draft, service);
+  }
+
+  if (session.step === 'staff_add_time') {
+    const slot = session.staffSlotOptions?.[Number(text.trim()) - 1] || null;
+    if (!slot) return buildStaffAddTimeOptions(config, session, draft, findService(config.services, draft.service));
+    draft.date = slot.date;
+    draft.time = slot.time;
+    draft.artist = slot.artist;
+    session.step = 'staff_add_contact';
+    return withStaffBackAction('請輸入客人姓名與手機，例如「王小美 0912345678」。');
+  }
+
+  if (session.step === 'staff_add_contact') {
+    mergeStaffContactData(draft, text, config);
+    if (!draft.customerName || !draft.phone) return withStaffBackAction('請輸入客人姓名與手機，例如「王小美 0912345678」。');
+    if (!isValidTaiwanMobile(draft.phone)) {
+      draft.phone = '';
+      return withStaffBackAction('手機號碼格式不正確，請輸入 09 開頭的 10 碼手機號碼。');
+    }
+    const service = findService(config.services, draft.service);
+    session.step = 'staff_add_confirm';
+    return [
+      '請確認是否新增這筆預約：',
+      `客人：${draft.customerName}`,
+      `電話：${draft.phone}`,
+      `服務：${service.name}`,
+      `美甲師：${draft.artist}`,
+      `時間：${draft.date} ${draft.time}`,
+      '',
+      '1. 確認新增',
+      '2. 取消新增',
+      '9. 回上一層',
+      '0. 店家模式',
+    ].join('\n');
+  }
+
   if (session.step === 'staff_add_confirm' && isConfirmRescheduleText(text)) {
-    const draft = session.staffAddBooking;
     if (!draft) return withStaffHomeAction('新增資料已過期，請重新輸入「新增預約」。');
     const service = findService(config.services, draft.service);
     try {
+      await pushStaffProcessing(userId);
       const result = await storeCreateBooking(draft);
       resetStaffSession(session);
       return withStaffHomeAction([
@@ -1047,7 +1280,6 @@ async function handleStaffAddBooking({ text, session, config }) {
     return buildStaffMenu();
   }
 
-  session.staffAddBooking = session.staffAddBooking || {};
   if (/^\d+$/.test(String(text || '').trim()) && Array.isArray(session.staffSlotOptions)) {
     const slot = session.staffSlotOptions[Number(text.trim()) - 1];
     if (slot) {
@@ -1059,21 +1291,20 @@ async function handleStaffAddBooking({ text, session, config }) {
   const local = extractLocalBookingData(text, config);
   mergeBookingData(session.staffAddBooking, local.booking);
   mergeStaffContactData(session.staffAddBooking, text, config);
-  const draft = session.staffAddBooking;
   const service = findService(config.services, draft.service);
 
   if (!draft.date || !draft.time || !service || !draft.artist || !draft.customerName || !draft.phone) {
     session.step = 'staff_add_change';
-    return withStaffHomeAction([
+    return withStaffBackAction([
       '請補齊新增預約資料：日期、時間、服務、美甲師、姓名、手機。',
-      '例如：新增預約 5/21 16:00 單色 Amy 王小美 0912345678',
+      '例如：5/21 16:00 單色 Amy 王小美 0912345678',
       '',
       formatStaffAddDraft(draft),
     ].join('\n'));
   }
   if (!isValidTaiwanMobile(draft.phone)) {
     draft.phone = '';
-    return withStaffHomeAction('手機號碼格式不正確，請輸入 09 開頭的 10 碼手機號碼。');
+    return withStaffBackAction('手機號碼格式不正確，請輸入 09 開頭的 10 碼手機號碼。');
   }
   const slots = findConsecutiveSlots(config.slots, draft, service, config.settings);
   if (!isBookingFarEnough(draft, config.settings) || !slots.length) {
@@ -1084,7 +1315,7 @@ async function handleStaffAddBooking({ text, session, config }) {
       period: draft.period || '',
     }, service, config.settings).slice(0, 6);
     session.staffSlotOptions = suggestions;
-    return withStaffHomeAction([
+    return withStaffBackAction([
       buildUnavailableReason(config, draft, service) || `${draft.date} ${draft.time} 沒有足夠空檔。`,
       suggestions.length ? '可新增以下時段：' : '請換日期、時段或美甲師。',
       ...suggestions.map((slot, index) => `${index + 1}. ${slot.date} ${slot.time}｜${slot.artist}`),
@@ -1103,6 +1334,7 @@ async function handleStaffAddBooking({ text, session, config }) {
     '',
     '1. 確認新增',
     '2. 取消新增',
+    '9. 回上一層',
     '0. 店家模式',
   ].join('\n');
 }
@@ -1145,14 +1377,14 @@ async function handleStaffExtend({ text, session }) {
   if (pendingMinutes) session.staffExtendMinutes = pendingMinutes;
   if (!session.staffExtendBooking) {
     const bookingId = normalizeShortBookingInput(text);
-    if (!bookingId) return withStaffHomeAction('請輸入要延時的預約編號，例如「延時 001 30」。');
+    if (!bookingId) return withStaffBackAction('請輸入要延時的預約編號，例如「001」。');
     const loaded = await tryLoadStoreBooking(bookingId, session, 'extend');
-    if (!loaded.ok) return withStaffHomeAction(loaded.message);
+    if (!loaded.ok) return withStaffBackAction(loaded.message);
     session.staffExtendBooking = loaded.data;
   }
   if (!session.staffExtendMinutes) {
     session.step = 'staff_extend_minutes';
-    return withStaffHomeAction([
+    return withStaffBackAction([
       '請輸入要延長幾分鐘，例如「30」。',
       formatStoreBooking(session.staffExtendBooking),
     ].join('\n'));
@@ -1164,6 +1396,7 @@ async function handleStaffExtend({ text, session }) {
     '',
     '1. 確認修改',
     '2. 取消修改',
+    '9. 回上一層',
     '0. 店家模式',
   ].join('\n');
 }
@@ -1441,12 +1674,19 @@ function isContactControlText(text) {
 }
 
 function isValidTaiwanMobile(phone) {
-  return /^09\d{8}$/.test(String(phone || '').trim());
+  return /^09\d{8}$/.test(normalizeTaiwanMobile(phone));
 }
 
 function extractTaiwanMobile(text) {
-  const match = String(text || '').match(/(?:^|[^\d])(09\d{8})(?!\d)/);
-  return match?.[1] || '';
+  const match = String(text || '').match(/(?:^|[^\d])(0?9\d{8})(?!\d)/);
+  return normalizeTaiwanMobile(match?.[1] || '');
+}
+
+function normalizeTaiwanMobile(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  if (/^09\d{8}$/.test(digits)) return digits;
+  if (/^9\d{8}$/.test(digits)) return `0${digits}`;
+  return String(phone || '').trim();
 }
 
 function isLikelyOptionOrTimeInput(text) {
@@ -3113,6 +3353,18 @@ async function safeReplyText(event, userId, text) {
     } else {
       throw error;
     }
+  }
+}
+
+async function pushStaffProcessing(userId) {
+  if (!userId || !userId.startsWith('U')) return;
+  try {
+    await lineClient.pushMessage({
+      to: userId,
+      messages: [{ type: 'text', text: '爲您確認中，請稍後' }],
+    });
+  } catch (error) {
+    console.error('pushStaffProcessing failed:', error.response?.data || error.message);
   }
 }
 

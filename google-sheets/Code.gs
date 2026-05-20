@@ -795,11 +795,11 @@ function getStoreBookingCandidates_(ss, bookingId) {
 function searchStoreCustomerBookings_(ss, query) {
   const keyword = String(query || '').trim();
   if (!keyword) throw new Error('請輸入客人姓名或手機。');
-  const phone = keyword.match(/09\d{8}/)?.[0] || '';
+  const phone = normalizeTaiwanMobile_(keyword);
   const normalized = keyword.replace(/\s+/g, '');
   return readBookings_(ss)
     .filter((booking) => {
-      if (phone && String(booking.phone || '').includes(phone)) return true;
+      if (phone && normalizeTaiwanMobile_(booking.phone) === phone) return true;
       return String(booking.customer || '').replace(/\s+/g, '').includes(normalized);
     })
     .sort((a, b) => String(b.date).localeCompare(String(a.date)) || b.startMinutes - a.startMinutes)
@@ -1093,6 +1093,7 @@ function buildBookingQuery_(ss) {
   if (rows.length) sheet.getRange(4, 1, rows.length, 11).setValues(rows);
   sheet.getRange('C4:C5000').setNumberFormat('yyyy-mm-dd');
   sheet.getRange('D4:E5000').setNumberFormat('hh:mm');
+  sheet.getRange('I4:I5000').setNumberFormat('@');
   applyBookingStatusRowRules_(ss);
 }
 
@@ -1130,6 +1131,7 @@ function rebuildCustomers_(ss) {
     ];
   });
   setupCustomers_(ss);
+  sheet.getRange('C2:C5000').setNumberFormat('@');
   if (rows.length) sheet.getRange(2, 1, rows.length, 14).setValues(rows);
 }
 
@@ -1153,7 +1155,7 @@ function parseBookingRow_(row) {
     source: row[2],
     createdAt: row[3],
     customer: row[4] || '現場客',
-    phone: row[5] || '',
+    phone: normalizeTaiwanMobile_(row[5]),
     lineUserId: row[6] || '',
     lineDisplayName: row[7] || '',
     artist: row[8],
@@ -1174,7 +1176,14 @@ function parseBookingRow_(row) {
 }
 
 function isValidTaiwanMobile_(phone) {
-  return /^09\d{8}$/.test(String(phone || '').trim());
+  return /^09\d{8}$/.test(normalizeTaiwanMobile_(phone));
+}
+
+function normalizeTaiwanMobile_(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  if (/^09\d{8}$/.test(digits)) return digits;
+  if (/^9\d{8}$/.test(digits)) return `0${digits}`;
+  return String(phone || '').trim();
 }
 
 function findBookingAt_(bookings, artist, dateText, minutes) {
