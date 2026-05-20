@@ -498,9 +498,9 @@ function handleWeekCommand_(sheet) {
       ss.getSheetByName(SHEETS.week).getRange('B5').setValue('執行成功：已修復表格。');
     } else if (command === '完成預約' || command === '標記完成') {
       const id = sheet.getRange('B3').getValue();
-      markBookingCompleted_(ss, id);
+      const booking = markBookingCompleted_(ss, id);
       refreshSystemData(false);
-      sheet.getRange('B5').setValue(`執行成功：已標記 ${shortBookingId_(id)}號完成。`);
+      ss.getSheetByName(SHEETS.week).getRange('B5').setValue(`執行成功：${shortBookingId_(booking.id)}號已完成｜${booking.date} ${booking.startTime}｜${booking.artist}｜${booking.customer}`);
     }
   } catch (error) {
     sheet.getRange('B5').setValue(`執行失敗：${error.message}`);
@@ -691,11 +691,13 @@ function cancelManualBooking_(ss, id) {
 
 function markBookingCompleted_(ss, id) {
   const found = resolveBookingRow_(ss, id);
+  const booking = parseBookingRow_(found.values);
   const sheet = ss.getSheetByName(SHEETS.bookings);
   sheet.getRange(found.rowNumber, 2).setValue('已完成');
   sheet.getRange(found.rowNumber, 16).setValue(new Date());
   sheet.getRange(found.rowNumber, 19).setValue(new Date());
   rebuildCustomers_(ss);
+  return booking;
 }
 
 function createApiBooking_(ss, booking) {
@@ -1207,10 +1209,6 @@ function parseBookingRow_(row) {
   const start = timeToMinutes_(row[11]);
   const end = row[12] ? timeToMinutes_(row[12]) : start + Number(row[13] || 30);
   const completedAt = row[15] instanceof Date ? row[15] : null;
-  let effectiveEnd = end;
-  if (row[1] === '已完成' && completedAt && formatDate_(completedAt) === formatMaybeDate_(row[10])) {
-    effectiveEnd = Math.min(end, completedAt.getHours() * 60 + completedAt.getMinutes());
-  }
   return {
     id: row[0],
     status: row[1],
@@ -1228,7 +1226,7 @@ function parseBookingRow_(row) {
     endTime: normalizeTimeText_(row[12]),
     startMinutes: start,
     endMinutes: end,
-    effectiveEndMinutes: effectiveEnd,
+    effectiveEndMinutes: end,
     duration: Number(row[13] || (end - start)),
     note: row[14] || '',
     completedAt,
