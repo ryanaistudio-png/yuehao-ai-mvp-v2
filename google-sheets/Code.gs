@@ -64,11 +64,16 @@ function onEdit(e) {
   if (name === SHEETS.week && row === 2 && col === 2) buildWeekView_(getAppSpreadsheet_());
   if (name === SHEETS.week && row === 4 && col === 2) handleWeekCommand_(sheet);
   if (name === SHEETS.add && row === 12 && col === 2) handleAddCommand_(sheet);
-  if (name === SHEETS.edit && col === 2 && getRowLabel_(sheet, row) === '執行指令') handleEditCommand_(sheet);
+  if (name === SHEETS.edit && col === 2 && isEditCommandValue_(e.value || e.range.getValue())) handleEditCommand_(sheet);
   if (name === SHEETS.query && row === 2 && [2, 5].includes(col)) buildBookingQuery_(getAppSpreadsheet_());
   if ([SHEETS.artists, SHEETS.fixed, SHEETS.special, SHEETS.services, SHEETS.settings].includes(name) && e.range.getRow() >= 2) {
     refreshSystemData(false);
   }
+}
+
+function isEditCommandValue_(value) {
+  return ['載入預約', '修改預約', '修改時間', '延長時間', '取消預約', '更新預約畫面']
+    .includes(String(value || '').trim());
 }
 
 function doPost(e) {
