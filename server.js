@@ -914,6 +914,7 @@ function handleStaffRescheduleArtist({ text, session, config }) {
   const selected = artists[Number(String(text || '').trim()) - 1] || null;
   const artist = selected || (config.artists || []).find((item) => item.name === String(text || '').trim());
   if (!artist) return buildStaffRescheduleArtistOptions(config, session);
+  session.staffRescheduleMode = 'artist';
   session.staffChange = { artist: artist.name };
   return handleStaffRescheduleChange({ text: '', session, config });
 }
@@ -1455,6 +1456,16 @@ function handleStaffRescheduleChange({ text, session, config }) {
   }
   const slots = findConsecutiveSlots(config.slots, next, service, config.settings, booking.id);
   if (!isBookingFarEnough(next, config.settings) || !slots.length) {
+    if (['artist', 'service'].includes(session.staffRescheduleMode) && !change.date && !change.time && !change.period) {
+      session.step = 'staff_reschedule_date';
+      const reason = buildUnavailableReason(config, next, service)
+        || `原本時段 ${next.date} ${next.time} 無法安排「${service.name}」與 ${next.artist}，請改選新的日期。`;
+      return withStaffBackAction([
+        reason,
+        '',
+        buildStaffRescheduleDateOptions(config, session).replace(/9\. 回上一層\n0\. 店家模式$/, '').trim(),
+      ].join('\n'));
+    }
     session.step = 'staff_reschedule_change';
     return buildStaffRescheduleSlotOptions({ config, session, booking, next, change, service, requestedTime: next.time });
   }
@@ -3192,10 +3203,11 @@ async function handleRescheduleFlow({ userId, text, ai, local, session, config }
       session.rescheduleJustSelected = false;
       return buildCustomerModifyMenu(session.rescheduleBooking);
     }
-    if (text === '1') return beginCustomerRescheduleArtist(session, config);
-    if (text === '2') return beginCustomerRescheduleButtonFlow(session, 'time', config);
-    if (text === '3') return beginCustomerRescheduleServiceFlow(session, 'service', config);
-    if (text === '4') return beginCustomerRescheduleServiceFlow(session, 'all', config);
+    if (text === '1') return beginCustomerRescheduleButtonFlow(session, 'time', config);
+    if (text === '2') {
+      sessions.delete(effectiveUserId);
+      return buildRestartMessage();
+    }
     return buildCustomerModifyMenu(session.rescheduleBooking);
   }
 
@@ -3290,11 +3302,9 @@ function beginCustomerModifyMenu(session, booking) {
 function buildCustomerModifyMenu(booking) {
   return [
     `我找到預約編號 ${shortBookingId(booking.id)}號：${booking.date} ${booking.start}｜${booking.artist}｜${booking.service}`,
-    '請選擇要修改的項目：',
-    '1. 改美甲師',
-    '2. 改時間',
-    '3. 改服務項目',
-    '4. 全部修改',
+    '請問要改預約時間嗎？',
+    '1. 改時間',
+    '2. 取消修改',
     '0. 回首頁',
   ].join('\n');
 }
