@@ -64,7 +64,7 @@ function onEdit(e) {
   if (name === SHEETS.week && row === 2 && col === 2) buildWeekView_(getAppSpreadsheet_());
   if (name === SHEETS.week && row === 4 && col === 2) handleWeekCommand_(sheet);
   if (name === SHEETS.add && row === 12 && col === 2) handleAddCommand_(sheet);
-  if (name === SHEETS.edit && row === 10 && col === 2) handleEditCommand_(sheet);
+  if (name === SHEETS.edit && col === 2 && getRowLabel_(sheet, row) === '執行指令') handleEditCommand_(sheet);
   if (name === SHEETS.query && row === 2 && [2, 5].includes(col)) buildBookingQuery_(getAppSpreadsheet_());
   if ([SHEETS.artists, SHEETS.fixed, SHEETS.special, SHEETS.services, SHEETS.settings].includes(name) && e.range.getRow() >= 2) {
     refreshSystemData(false);
@@ -168,6 +168,7 @@ function applyV3Layout() {
 
 function refreshSystemData(showUi) {
   const ss = getAppSpreadsheet_();
+  migrateServiceNames_(ss);
   syncFixedScheduleArtists_(ss);
   refreshDropdowns_();
   rebuildAvailableSlots_(ss);
@@ -197,9 +198,19 @@ function syncArtistsAndRefresh() {
 
 function ensureCoreDataTables_(ss) {
   if (isSheetEmpty_(ss.getSheetByName(SHEETS.services))) setupServices_(ss);
+  migrateServiceNames_(ss);
   if (isSheetEmpty_(ss.getSheetByName(SHEETS.artists))) setupArtists_(ss);
   if (isSheetEmpty_(ss.getSheetByName(SHEETS.special))) setupSpecialDays_(ss);
   if (isSheetEmpty_(ss.getSheetByName(SHEETS.fixed))) setupFixedSchedule_(ss);
+}
+
+function migrateServiceNames_(ss) {
+  const sheet = ss.getSheetByName(SHEETS.services);
+  if (!sheet) return;
+  const values = sheet.getRange(2, 1, Math.max(sheet.getLastRow() - 1, 1), 1).getValues();
+  values.forEach((row, index) => {
+    if (String(row[0] || '').trim() === '延時') sheet.getRange(index + 2, 1).setValue('延時/縮時');
+  });
 }
 
 function isSheetEmpty_(sheet) {
@@ -533,47 +544,50 @@ function handleAddCommand_(sheet) {
 }
 
 function handleEditCommand_(sheet) {
-  const command = String(sheet.getRange('B10').getValue() || '').trim();
+  const commandRow = findKeyRow_(sheet, '執行指令') || 10;
+  const resultRow = findKeyRow_(sheet, '執行結果') || commandRow + 1;
+  const allowSpecialRow = findKeyRow_(sheet, '允許特殊時段') || 9;
+  const command = String(sheet.getRange(commandRow, 2).getValue() || '').trim();
   if (!command || command === '未執行') return;
   const ss = getAppSpreadsheet_();
   try {
     if (command === '更新預約畫面') {
       refreshSystemData(false);
-      sheet.getRange('B11').setValue('執行成功：已更新預約畫面。');
+      sheet.getRange(resultRow, 2).setValue('執行成功：已更新預約畫面。');
       return;
     }
-    const id = sheet.getRange('B2').getValue();
+    const id = getKeyValue_(sheet, '預約編號', 'B2');
     if (command === '載入預約') {
       const found = resolveBookingRow_(ss, id);
       const booking = parseBookingRow_(found.values);
       fillEditCurrentBooking_(sheet, booking);
-      sheet.getRange('B11').setValue(`已載入預約 ${shortBookingId_(booking.id)}號。`);
+      sheet.getRange(resultRow, 2).setValue(`已載入預約 ${shortBookingId_(booking.id)}號。`);
       return;
     }
     if (command === '修改預約' || command === '修改時間') {
       updateBookingTime_(ss, readEditForm_(sheet));
       refreshSystemData(false);
-      sheet.getRange('B11').setValue('執行成功：已修改預約。');
+      sheet.getRange(resultRow, 2).setValue('執行成功：已修改預約。');
       return;
     }
     if (command === '延長時間') {
       extendBooking_(ss, readEditForm_(sheet));
       refreshSystemData(false);
-      sheet.getRange('B11').setValue('執行成功：已調整預約時間。');
+      sheet.getRange(resultRow, 2).setValue('執行成功：已調整預約時間。');
       return;
     }
     if (command === '取消預約') {
       cancelManualBooking_(ss, id);
       refreshSystemData(false);
-      sheet.getRange('B11').setValue(`執行成功：已取消 ${shortBookingId_(id)}號。`);
+      sheet.getRange(resultRow, 2).setValue(`執行成功：已取消 ${shortBookingId_(id)}號。`);
       return;
     }
     throw new Error('請選擇有效指令。');
   } catch (error) {
-    sheet.getRange('B11').setValue(`執行失敗：${error.message}`);
+    sheet.getRange(resultRow, 2).setValue(`執行失敗：${error.message}`);
   } finally {
-    sheet.getRange('B10').setValue('未執行');
-    sheet.getRange('B9').setValue('否');
+    sheet.getRange(commandRow, 2).setValue('未執行');
+    sheet.getRange(allowSpecialRow, 2).setValue('否');
   }
 }
 
@@ -591,25 +605,50 @@ function readAddForm_(sheet) {
   };
 }
 
+function getRowLabel_(sheet, row) {
+  return String(sheet.getRange(row, 1).getValue() || '').trim();
+}
+
+function findKeyRow_(sheet, label) {
+  const values = sheet.getRange(1, 1, Math.max(sheet.getLastRow(), 1), 1).getValues();
+  const target = String(label || '').trim();
+  const index = values.findIndex((row) => String(row[0] || '').trim() === target);
+  return index >= 0 ? index + 1 : 0;
+}
+
+function getKeyValue_(sheet, label, fallbackA1) {
+  const row = findKeyRow_(sheet, label);
+  return row ? sheet.getRange(row, 2).getValue() : sheet.getRange(fallbackA1).getValue();
+}
+
+function setKeyValue_(sheet, label, value, fallbackA1) {
+  const row = findKeyRow_(sheet, label);
+  if (row) {
+    sheet.getRange(row, 2).setValue(value);
+    return;
+  }
+  sheet.getRange(fallbackA1).setValue(value);
+}
+
 function readEditForm_(sheet) {
   return {
-    id: sheet.getRange('B2').getValue(),
-    newArtist: sheet.getRange('B4').getValue(),
-    newService: sheet.getRange('B5').getValue(),
-    newDate: sheet.getRange('B6').getValue(),
-    newStartTime: normalizeTimeText_(sheet.getRange('B7').getValue()),
-    extendMinutes: Number(sheet.getRange('B8').getValue() || 0),
-    allowSpecial: String(sheet.getRange('B9').getValue() || '否'),
+    id: getKeyValue_(sheet, '預約編號', 'B2'),
+    newArtist: getKeyValue_(sheet, '新美甲師', 'B4'),
+    newService: getKeyValue_(sheet, '新服務', 'B5'),
+    newDate: getKeyValue_(sheet, '新日期', 'B6'),
+    newStartTime: normalizeTimeText_(getKeyValue_(sheet, '新開始時間', 'B7')),
+    extendMinutes: Number(getKeyValue_(sheet, '調整分鐘', 'B8') || 0),
+    allowSpecial: String(getKeyValue_(sheet, '允許特殊時段', 'B9') || '否'),
   };
 }
 
 function fillEditCurrentBooking_(sheet, booking) {
-  sheet.getRange('B3').setValue(`${booking.id}｜${booking.status}｜${booking.date} ${booking.startTime}-${booking.endTime}｜${booking.artist}｜${booking.service}｜${booking.customer}`);
-  sheet.getRange('B4').setValue(booking.artist);
-  sheet.getRange('B5').setValue(booking.service);
-  sheet.getRange('B6').setValue(booking.dateValue);
-  sheet.getRange('B7').setValue(booking.startTime);
-  sheet.getRange('B8').clearContent();
+  setKeyValue_(sheet, '目前預約資訊', `${booking.id}｜${booking.status}｜${booking.date} ${booking.startTime}-${booking.endTime}｜${booking.artist}｜${booking.service}｜${booking.customer}`, 'B3');
+  setKeyValue_(sheet, '新美甲師', booking.artist, 'B4');
+  setKeyValue_(sheet, '新服務', booking.service, 'B5');
+  setKeyValue_(sheet, '新日期', booking.dateValue, 'B6');
+  setKeyValue_(sheet, '新開始時間', booking.startTime, 'B7');
+  setKeyValue_(sheet, '調整分鐘', '', 'B8');
 }
 
 function createManualBooking_(ss, values) {
