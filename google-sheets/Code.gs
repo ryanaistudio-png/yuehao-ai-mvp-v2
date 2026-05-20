@@ -129,6 +129,7 @@ function setupYuehaoV3() {
   refreshDropdowns_();
   refreshSystemData(false);
   sortAndColorSheets_(ss);
+  freezeFirstColumnAllSheets_(ss);
   hideSystemSheets();
   safeUiAlert_('約好 AI MVP v3 已建立完成。');
 }
@@ -150,6 +151,7 @@ function applyV3Layout() {
   buildWeekView_(ss);
   buildBookingQuery_(ss);
   sortAndColorSheets_(ss);
+  freezeFirstColumnAllSheets_(ss);
   deleteLegacySheets();
   hideSystemSheets();
   safeUiAlert_('已套用 v3 安全版面，不會清空預約資料。若需要重新產生 LINE 可預約時段，請再執行「更新預約畫面」。');
@@ -164,6 +166,7 @@ function refreshSystemData(showUi) {
   buildBookingQuery_(ss);
   rebuildCustomers_(ss);
   applyBookingStatusRowRules_(ss);
+  freezeFirstColumnAllSheets_(ss);
   if (showUi !== false) safeUiAlert_('已更新預約畫面。');
 }
 
@@ -1561,6 +1564,13 @@ function sortAndColorSheets_(ss) {
     ss.setActiveSheet(sheet);
     ss.moveActiveSheet(index + 1);
     sheet.setTabColor(colors[name] || null);
+  });
+}
+
+function freezeFirstColumnAllSheets_(ss) {
+  Object.values(SHEETS).forEach((name) => {
+    const sheet = ss.getSheetByName(name);
+    if (sheet) sheet.setFrozenColumns(1);
   });
 }
 
