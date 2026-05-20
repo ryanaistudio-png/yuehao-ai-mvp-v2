@@ -586,7 +586,7 @@ async function handleStaffFlow({ userId, text, session, config }) {
   if (text === '3' && session.step === 'staff_ops_menu') {
     session.step = 'staff_extend_wait_id';
     session.staffParentMenu = 'ops';
-    return withStaffBackAction('請輸入要延時的預約編號，例如「001」。');
+    return withStaffBackAction('請輸入要延時/縮時的預約編號，例如「001」。');
   }
 
   if (text === '4' && session.step === 'staff_ops_menu') {
@@ -739,19 +739,19 @@ async function handleStaffFlow({ userId, text, session, config }) {
   if (session.step === 'staff_extend_confirm' && isConfirmRescheduleText(text)) {
     const booking = session.staffExtendBooking;
     const minutes = session.staffExtendMinutes;
-    if (!booking || !minutes) return withStaffBackAction('延時資訊已過期，請回上一層重新選擇。');
+    if (!booking || !minutes) return withStaffBackAction('調整時間資訊已過期，請回上一層重新選擇。');
     try {
       await pushStaffProcessing(userId);
       const result = await storeExtendBooking(booking.id, minutes);
       resetStaffSession(session);
       return withStaffHomeAction([
-        `已延長預約 ${shortBookingId(result.bookingId)}號。`,
+        `已${formatDurationAdjustVerb(minutes)}預約 ${shortBookingId(result.bookingId)}號。`,
         `時間：${result.date} ${result.time}-${result.end}`,
         `美甲師：${result.artist}`,
       ].join('\n'));
     } catch (error) {
       session.step = 'staff_extend_minutes';
-      return withStaffHomeAction(`延時失敗：${error.message}\n請改輸入其他分鐘數，或輸入 0 回店家模式。`);
+      return withStaffHomeAction(`調整時間失敗：${error.message}\n請改輸入其他分鐘數，或輸入 0 回店家模式。`);
     }
   }
 
@@ -760,13 +760,13 @@ async function handleStaffFlow({ userId, text, session, config }) {
     return buildStaffMenu();
   }
 
-  if (text === '延時') {
+  if (text === '延時' || text === '縮時' || text === '延時/縮時') {
     session.step = 'staff_extend_wait_id';
     session.staffParentMenu = 'ops';
-    return withStaffBackAction('請輸入要延時的預約編號，例如「001」。');
+    return withStaffBackAction('請輸入要延時/縮時的預約編號，例如「001」。');
   }
 
-  const extendId = /^延時\s*\d+|^延時\s*預約\s*\d+/.test(text) ? normalizeShortBookingInput(text) : '';
+  const extendId = /^(延時|縮時|延時\/縮時)\s*\d+|^(延時|縮時|延時\/縮時)\s*預約\s*\d+/.test(text) ? normalizeShortBookingInput(text) : '';
   if (extendId || session.step === 'staff_extend_wait_id' || session.step === 'staff_extend_minutes') {
     return handleStaffExtend({ text, session });
   }
@@ -842,7 +842,7 @@ function finishStaffLookup(session, booking) {
     formatStoreBooking(booking),
     '',
     '1. 修改',
-    '2. 延時',
+    '2. 延時/縮時',
     '3. 取消',
   ].join('\n'));
 }
@@ -917,12 +917,18 @@ function beginStaffExtend(session, booking) {
   session.step = 'staff_extend_minutes';
   session.staffPendingAction = null;
   session.staffParentMenu = 'ops';
+  session.staffBooking = booking;
   session.staffExtendBooking = booking;
+  return buildStaffAdjustDurationPrompt(booking);
+}
+
+function buildStaffAdjustDurationPrompt(booking) {
   return withStaffBackAction([
     '我找到這筆預約：',
     formatStoreBooking(booking),
     '',
-    '請輸入要延長幾分鐘，例如「30」。',
+    '請輸入要調整的分鐘數，例如：30、60、-30、-60。',
+    '正數代表延長，負數代表縮短。',
   ].join('\n'));
 }
 
@@ -985,6 +991,8 @@ function isStaffCommandText(text, session) {
     || text === '查空檔'
     || text === '新增預約'
     || text === '延時'
+    || text === '縮時'
+    || text === '延時/縮時'
     || Boolean(parseDateText(text))
     || /^查日期/.test(text)
     || /^查預約\s*\d+/.test(text)
@@ -992,7 +1000,7 @@ function isStaffCommandText(text, session) {
     || /^查客人\s+/.test(text)
     || /^查空檔/.test(text)
     || /^新增預約/.test(text)
-    || /^延時\s*(預約\s*)?\d*/.test(text)
+    || /^(延時|縮時|延時\/縮時)\s*(預約\s*)?\d*/.test(text)
     || /^修改\s*(預約\s*)?\d+/.test(text)
     || /^取消\s*(預約\s*)?\d+/.test(text);
 }
@@ -1088,6 +1096,16 @@ function goBackStaffMenu(session, config) {
     session.step = draft.fromGap ? 'staff_gap_phone' : 'staff_add_phone';
     return buildStaffAskPhone(draft);
   }
+  if (step === 'staff_extend_confirm') {
+    session.step = 'staff_extend_minutes';
+    return buildStaffAdjustDurationPrompt(session.staffExtendBooking);
+  }
+  if (step === 'staff_extend_minutes') {
+    if (session.staffBooking) return finishStaffLookup(session, session.staffBooking);
+    if (Array.isArray(session.staffDateBookings) && session.staffDateBookings.length) return renderStoreDateBookings(session);
+    session.step = 'staff_ops_menu';
+    return buildStaffOpsMenu();
+  }
   if (step === 'staff_booking_actions') {
     if (Array.isArray(session.staffDateBookings) && session.staffDateBookings.length) {
       return renderStoreDateBookings(session);
@@ -1147,7 +1165,7 @@ function buildStaffOpsMenu() {
     '現場操作',
     '1. 新增預約',
     '2. 查空檔',
-    '3. 延時',
+    '3. 延時/縮時',
     '4. 修改預約',
     '5. 取消預約',
     '0. 店家模式',
@@ -1172,7 +1190,7 @@ function buildStoreDateBookings(bookings, date, title = '', session = null) {
     `${heading}：`,
     ...bookings.map((booking, index) => `${index + 1}. ${shortBookingId(booking.id)}｜${booking.start}｜${booking.artist}｜${booking.service}｜${booking.customer}｜${booking.phone}`),
     '',
-    '請選擇預約，可接著修改、延時或取消。',
+    '請選擇預約，可接著修改、延時/縮時或取消。',
   ].join('\n');
   return session ? withStaffBackAction(body) : withStaffHomeAction(body);
 }
@@ -1187,7 +1205,7 @@ function renderStoreDateBookings(session) {
     `${heading}：`,
     ...bookings.map((booking, index) => `${index + 1}. ${shortBookingId(booking.id)}｜${booking.start}｜${booking.artist}｜${booking.service}｜${booking.customer}｜${booking.phone}`),
     '',
-    '請選擇預約，可接著修改、延時或取消。',
+    '請選擇預約，可接著修改、延時/縮時或取消。',
   ].join('\n'));
 }
 
@@ -1708,7 +1726,7 @@ function extractStaffCustomerName(text, config, phone) {
   (config.services || []).forEach((service) => { value = value.replace(service.name, ' '); });
   (config.artists || []).forEach((artist) => { value = value.replace(artist.name, ' '); });
   value = value
-    .replace(/新增預約|查空檔|延時/g, ' ')
+    .replace(/新增預約|查空檔|延時\/縮時|延時|縮時/g, ' ')
     .replace(/\d{1,2}\s*月\s*\d{1,2}\s*(日|號)?/g, ' ')
     .replace(/\d{1,2}[/-]\d{1,2}/g, ' ')
     .replace(/\d{1,2}[:：]\d{2}/g, ' ')
@@ -1728,25 +1746,25 @@ function formatStaffAddDraft(draft = {}) {
 }
 
 async function handleStaffExtend({ text, session }) {
-  const pendingMinutes = parseExtendMinutes(text);
-  if (pendingMinutes) session.staffExtendMinutes = pendingMinutes;
+  const hadBooking = Boolean(session.staffExtendBooking);
   if (!session.staffExtendBooking) {
     const bookingId = normalizeShortBookingInput(text);
-    if (!bookingId) return withStaffBackAction('請輸入要延時的預約編號，例如「001」。');
+    if (!bookingId) return withStaffBackAction('請輸入要延時/縮時的預約編號，例如「001」。');
     const loaded = await tryLoadStoreBooking(bookingId, session, 'extend');
     if (!loaded.ok) return withStaffBackAction(loaded.message);
     session.staffExtendBooking = loaded.data;
+    session.staffBooking = loaded.data;
   }
+  const pendingMinutes = parseExtendMinutes(text, hadBooking);
+  if (pendingMinutes) session.staffExtendMinutes = pendingMinutes;
   if (!session.staffExtendMinutes) {
     session.step = 'staff_extend_minutes';
-    return withStaffBackAction([
-      '請輸入要延長幾分鐘，例如「30」。',
-      formatStoreBooking(session.staffExtendBooking),
-    ].join('\n'));
+    return buildStaffAdjustDurationPrompt(session.staffExtendBooking);
   }
   session.step = 'staff_extend_confirm';
+  const minutes = session.staffExtendMinutes;
   return [
-    `是否將預約 ${shortBookingId(session.staffExtendBooking.id)}號延長 ${session.staffExtendMinutes} 分鐘？`,
+    `是否將預約 ${shortBookingId(session.staffExtendBooking.id)}號${formatDurationAdjustVerb(minutes)} ${Math.abs(minutes)} 分鐘？`,
     formatStoreBooking(session.staffExtendBooking),
     '',
     '1. 確認修改',
@@ -1756,13 +1774,18 @@ async function handleStaffExtend({ text, session }) {
   ].join('\n');
 }
 
-function parseExtendMinutes(text) {
+function parseExtendMinutes(text, allowSingleNumber = true) {
   const raw = String(text || '');
-  const value = raw.replace(/延時|延長|分鐘|分/g, ' ');
-  const numbers = value.match(/\d+/g) || [];
+  const value = raw.replace(/延時\/縮時|延時|延長|縮時|縮短|分鐘|分/g, ' ');
+  const numbers = value.match(/-?\d+/g) || [];
   if (!numbers.length) return 0;
-  if (/延時|延長/.test(raw) && numbers.length < 2) return 0;
+  if (/延時|延長|縮時|縮短/.test(raw) && numbers.length < 2) return 0;
+  if (!allowSingleNumber && numbers.length < 2 && /^\d+$/.test(raw.trim())) return 0;
   return Number(numbers[numbers.length - 1]);
+}
+
+function formatDurationAdjustVerb(minutes) {
+  return Number(minutes || 0) < 0 ? '縮短' : '延長';
 }
 
 async function understandMessage(text, session, config) {

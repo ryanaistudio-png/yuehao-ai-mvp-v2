@@ -244,7 +244,7 @@ function setupEditSheet_(ss) {
     ['目前預約資訊', '', '載入後自動顯示'],
     ['新日期', '', '修改時間時填寫'],
     ['新開始時間', '', '修改時間時填寫'],
-    ['延時分鐘', '', '延長時間時填寫'],
+    ['調整分鐘', '', '延長填正數，縮短填負數'],
     ['允許特殊時段', '否', '預設否；遇休假、非營業、已過時間需改成是再執行'],
     ['執行指令', '未執行', '未執行 / 載入預約 / 修改時間 / 延長時間 / 取消預約 / 更新預約畫面'],
     ['執行結果', '', '系統自動填'],
@@ -325,7 +325,7 @@ function setupServices_(ss) {
     ['延甲', 150, 2200, '是', '是', '增加長度或調整甲型'],
     ['手部保養', 60, 800, '是', '是', '修型、甘皮處理、基礎護理'],
     ['款式諮詢/簡易服務', 60, 0, '是', '是', '還不知道款式時先預約諮詢'],
-    ['延時', 30, 0, '否', '是', '內部使用，請優先在 03 修改預約使用延長時間'],
+    ['延時/縮時', 30, 0, '否', '是', '內部使用，請優先在店家 LINE 或 03 修改預約使用調整時間'],
   ]);
   styleTable_(sheet);
 }
@@ -632,10 +632,12 @@ function updateBookingTime_(ss, values) {
 
 function extendBooking_(ss, values) {
   if (!values.id) throw new Error('請輸入預約編號。');
-  if (!values.extendMinutes) throw new Error('請選擇延時分鐘。');
+  if (!values.extendMinutes) throw new Error('請輸入調整分鐘。');
   const found = resolveBookingRow_(ss, values.id);
   const old = parseBookingRow_(found.values);
   const newDuration = old.duration + values.extendMinutes;
+  const minDuration = Number(readSettings_(ss).slot_minutes || 30);
+  if (newDuration < minDuration) throw new Error(`縮短後預約至少需要 ${minDuration} 分鐘。`);
   const newEnd = old.startMinutes + newDuration;
   assertNoConflict_(ss, old.id, old.artist, old.dateValue, old.startMinutes, newEnd);
   const warnings = getExceptionWarnings_(ss, old.artist, old.dateValue, old.startMinutes, newEnd);
@@ -643,7 +645,7 @@ function extendBooking_(ss, values) {
   ss.getSheetByName(SHEETS.bookings).getRange(found.rowNumber, 1, 1, 20).setValues([[
     old.id, '已確認', old.source, old.createdAt, old.customer, old.phone, old.lineUserId, old.lineDisplayName,
     old.artist, old.service, old.dateValue, old.startTime, minutesToTime_(newEnd),
-    newDuration, buildNote_(old.note, warnings.concat([`延時 ${values.extendMinutes} 分鐘`])), '', old.paymentStatus, old.paidAmount, new Date(), '',
+    newDuration, buildNote_(old.note, warnings.concat([`${values.extendMinutes > 0 ? '延長' : '縮短'} ${Math.abs(values.extendMinutes)} 分鐘`])), '', old.paymentStatus, old.paidAmount, new Date(), '',
   ]]);
 }
 
@@ -937,18 +939,20 @@ function storeUpdateBooking_(ss, booking) {
 
 function storeExtendBooking_(ss, bookingId, extraMinutes) {
   const minutes = Number(extraMinutes || 0);
-  if (!minutes || minutes < 0) throw new Error('請輸入要延長的分鐘數。');
+  if (!minutes) throw new Error('請輸入要調整的分鐘數。');
   const found = resolveBookingRow_(ss, bookingId);
   const old = parseBookingRow_(found.values);
-  if (['已取消', '已完成'].includes(old.status)) throw new Error('這筆預約目前不可延時');
+  if (['已取消', '已完成'].includes(old.status)) throw new Error('這筆預約目前不可調整時間');
   const newEnd = old.endMinutes + minutes;
+  const minDuration = Number(readSettings_(ss).slot_minutes || 30);
+  if (newEnd - old.startMinutes < minDuration) throw new Error(`縮短後預約至少需要 ${minDuration} 分鐘。`);
   assertNoConflict_(ss, old.id, old.artist, old.date, old.startMinutes, newEnd);
   const warnings = getExceptionWarnings_(ss, old.artist, old.date, old.startMinutes, newEnd);
   assertSpecialAllowed_(warnings, '否');
   const sheet = ss.getSheetByName(SHEETS.bookings);
   sheet.getRange(found.rowNumber, 13).setValue(minutesToTime_(newEnd));
   sheet.getRange(found.rowNumber, 14).setValue(newEnd - old.startMinutes);
-  sheet.getRange(found.rowNumber, 15).setValue(buildNote_(old.note, warnings));
+  sheet.getRange(found.rowNumber, 15).setValue(buildNote_(old.note, warnings.concat([`${minutes > 0 ? '延長' : '縮短'} ${Math.abs(minutes)} 分鐘`])));
   sheet.getRange(found.rowNumber, 19).setValue(new Date());
   refreshApiBookingData_(ss);
   return {
@@ -1491,7 +1495,7 @@ function buildOptionRows_() {
     ['修改指令', '未執行', '載入預約', '修改時間', '延長時間', '取消預約', '更新預約畫面'],
     ['是否', '是', '否'],
     ['時間', ...buildTimeOptions_()],
-    ['延時分鐘', 30, 60, 90, 120],
+    ['調整分鐘', 30, 60, -30, -60],
     ['月份', '全部', '1月', '2月', '3月', '4月', '5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月'],
     ['狀態查詢', '全部', '已確認', '待確認', '已完成', '已取消'],
     ['生日月份', '未填', '1月', '2月', '3月', '4月', '5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月'],
