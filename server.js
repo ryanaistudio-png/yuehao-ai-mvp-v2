@@ -570,7 +570,7 @@ async function handleStaffFlow({ userId, text, session, config }) {
     session.step = 'staff_availability_change';
     session.staffParentMenu = 'ops';
     session.staffAvailability = {};
-    return withStaffBackAction('請輸入日期、服務與時段，例如「5/21 單色 下午」。');
+    return buildStaffAvailabilityDateOptions(session);
   }
 
   if (text === '3' && session.step === 'staff_ops_menu') {
@@ -595,7 +595,7 @@ async function handleStaffFlow({ userId, text, session, config }) {
     session.step = 'staff_availability_change';
     session.staffParentMenu = 'ops';
     session.staffAvailability = {};
-    return withStaffBackAction('請輸入日期、服務與時段，例如「5/21 單色 下午」。');
+    return buildStaffAvailabilityDateOptions(session);
   }
 
   if (session.step === 'staff_cancel_confirm' && isConfirmCancelText(text)) {
@@ -906,6 +906,8 @@ function resetStaffSession(session) {
   session.staffExtendBooking = null;
   session.staffExtendMinutes = null;
   session.staffParentMenu = null;
+  session.staffAvailability = null;
+  session.staffAvailabilityDateOptions = null;
 }
 
 function isStaffHomeText(text) {
@@ -1114,41 +1116,79 @@ function formatStoreCustomerBookings(bookings, query) {
 }
 
 function handleStaffAvailability({ text, session, config }) {
-  const local = extractLocalBookingData(text, config);
   session.staffAvailability = session.staffAvailability || {};
-  mergeBookingData(session.staffAvailability, local.booking);
-  const query = session.staffAvailability;
-  const service = findService(config.services, query.service);
-  if (!query.date || !service) {
-    session.step = 'staff_availability_change';
-    return withStaffBackAction([
-      '請輸入查空檔條件，至少要有日期與服務。',
-      '例如：5/21 單色 下午',
-    ].join('\n'));
-  }
-  const slots = findAvailableStartSlots(config.slots, {
-    artist: query.artist || ANY_ARTIST,
-    date: query.date,
-    period: query.period || '',
-  }, service, config.settings);
-  const grouped = groupStaffAvailabilitySlots(slots).slice(0, 12);
   session.step = 'staff_availability_change';
-  if (!grouped.length) {
-    return withStaffBackAction(`${formatDateWithWeekday(query.date)} 目前沒有可完成「${service.name}」的空檔。`);
+
+  const optionIndex = Number(String(text || '').trim()) - 1;
+  const optionDate = Array.isArray(session.staffAvailabilityDateOptions)
+    ? session.staffAvailabilityDateOptions[optionIndex]
+    : '';
+  const date = optionDate || parseDateText(text);
+  if (!date) return buildStaffAvailabilityDateOptions(session);
+
+  session.staffAvailability.date = date;
+  const gaps = findStaffOpenGaps(config, date);
+  if (!gaps.length) {
+    return withStaffBackAction(`${formatDateWithWeekday(date)} 目前沒有連續空檔。`);
   }
   return withStaffBackAction([
-    `${formatDateWithWeekday(query.date)}「${service.name}」可約空檔：`,
-    ...grouped.map((item, index) => `${index + 1}. ${item.time}｜${item.artists.join('、')}`),
+    `${formatDateWithWeekday(date)} 連續空檔：`,
+    ...gaps.map((gap) => `${gap.start}｜${gap.artist}｜空檔 ${formatDuration(gap.duration)}`),
   ].join('\n'));
 }
 
-function groupStaffAvailabilitySlots(slots = []) {
-  const byTime = new Map();
-  slots.sort(compareSlots).forEach((slot) => {
-    if (!byTime.has(slot.time)) byTime.set(slot.time, { time: slot.time, artists: [] });
-    byTime.get(slot.time).artists.push(slot.artist);
+function buildStaffAvailabilityDateOptions(session) {
+  const dates = Array.from({ length: 7 }, (_item, index) => nowInZone().add(index, 'day').format('YYYY-MM-DD'));
+  session.staffAvailabilityDateOptions = dates;
+  return withStaffBackAction([
+    '請選擇要查詢空檔的日期：',
+    ...dates.map((date, index) => `${index + 1}. ${formatDateWithWeekday(date)}`),
+    '也可以直接輸入日期，例如：5/21。',
+  ].join('\n'));
+}
+
+function findStaffOpenGaps(config, date) {
+  const slotMinutes = Number(config.settings?.slot_minutes || 30);
+  const byArtist = new Map();
+  (config.slots || [])
+    .filter((slot) => slot.date === date)
+    .filter((slot) => isSlotOpenForBooking(slot))
+    .filter((slot) => isFutureEnough(slot, config.settings || {}))
+    .sort(compareSlots)
+    .forEach((slot) => {
+      if (!byArtist.has(slot.artist)) byArtist.set(slot.artist, []);
+      byArtist.get(slot.artist).push(slot);
+    });
+
+  const gaps = [];
+  byArtist.forEach((slots, artist) => {
+    let segmentStart = null;
+    let previous = null;
+    slots.forEach((slot) => {
+      const minutes = timeToMinutes(slot.time);
+      if (segmentStart === null) {
+        segmentStart = minutes;
+      } else if (previous !== null && minutes !== previous + slotMinutes) {
+        gaps.push({ artist, start: minutesToTime(segmentStart), duration: previous + slotMinutes - segmentStart });
+        segmentStart = minutes;
+      }
+      previous = minutes;
+    });
+    if (segmentStart !== null && previous !== null) {
+      gaps.push({ artist, start: minutesToTime(segmentStart), duration: previous + slotMinutes - segmentStart });
+    }
   });
-  return [...byTime.values()];
+  return gaps
+    .filter((gap) => gap.duration > 0)
+    .sort((a, b) => timeToMinutes(a.start) - timeToMinutes(b.start) || a.artist.localeCompare(b.artist));
+}
+
+function formatDuration(minutes) {
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  if (hours && rest) return `${hours}小時${rest}分鐘`;
+  if (hours) return `${hours}小時`;
+  return `${rest}分鐘`;
 }
 
 function buildStaffAddServiceOptions(config) {
