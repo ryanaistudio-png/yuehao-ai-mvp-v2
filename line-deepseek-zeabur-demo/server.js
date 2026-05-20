@@ -516,7 +516,7 @@ async function handleStaffFlow({ userId, text, session, config }) {
   }
 
   if (isStaffBackText(text, session)) {
-    return goBackStaffMenu(session);
+    return goBackStaffMenu(session, config);
   }
 
   if (text === '今日預約' || text === '1' && session.step === 'staff_menu') {
@@ -705,7 +705,8 @@ async function handleStaffFlow({ userId, text, session, config }) {
   }
 
   if (/^新增預約/.test(text) || session.step === 'staff_add_change' || session.step === 'staff_add_confirm'
-    || ['staff_add_service', 'staff_add_date', 'staff_add_period', 'staff_add_time', 'staff_add_contact'].includes(session.step)) {
+    || ['staff_add_service', 'staff_add_date', 'staff_add_period', 'staff_add_time', 'staff_add_name', 'staff_add_phone',
+      'staff_gap_service', 'staff_gap_time', 'staff_gap_name', 'staff_gap_phone'].includes(session.step)) {
     return handleStaffAddBooking({ userId, text: text.replace(/^新增預約/, '').trim(), session, config });
   }
 
@@ -908,6 +909,7 @@ function resetStaffSession(session) {
   session.staffParentMenu = null;
   session.staffAvailability = null;
   session.staffAvailabilityDateOptions = null;
+  session.staffAvailabilityGaps = null;
 }
 
 function isStaffHomeText(text) {
@@ -920,18 +922,76 @@ function isStaffBackText(text, session) {
     || value === '回上一層';
 }
 
-function goBackStaffMenu(session) {
-  if (session.staffParentMenu === 'ops' || [
-    'staff_add_service', 'staff_add_date', 'staff_add_period', 'staff_add_time', 'staff_add_contact',
-    'staff_extend_wait_id', 'staff_extend_minutes', 'staff_extend_confirm',
-    'staff_reschedule_wait_id', 'staff_reschedule_change', 'staff_reschedule_confirm',
-    'staff_cancel_wait_id', 'staff_cancel_confirm',
-  ].includes(session.step)) {
+function goBackStaffMenu(session, config) {
+  const step = session.step;
+  const draft = session.staffAddBooking || {};
+  const service = findService(config?.services || [], draft.service);
+
+  if (step === 'staff_add_phone') {
+    session.step = 'staff_add_name';
+    return buildStaffAskName();
+  }
+  if (step === 'staff_add_name') {
+    session.step = 'staff_add_time';
+    return buildStaffAddTimeOptions(config, session, draft, service);
+  }
+  if (step === 'staff_add_time') {
+    session.step = 'staff_add_period';
+    return buildStaffAddPeriodOptions(config, draft, service);
+  }
+  if (step === 'staff_add_period') {
+    session.step = 'staff_add_date';
+    return buildStaffAddDateOptions(config, draft, service);
+  }
+  if (step === 'staff_add_date') {
+    session.step = 'staff_add_service';
+    return buildStaffAddServiceOptions(config);
+  }
+  if (step === 'staff_add_service') {
     session.step = 'staff_ops_menu';
     return buildStaffOpsMenu();
   }
-  session.step = 'staff_query_menu';
-  return buildStaffQueryMenu();
+  if (step === 'staff_gap_phone') {
+    session.step = 'staff_gap_name';
+    return buildStaffAskName();
+  }
+  if (step === 'staff_gap_name') {
+    session.step = 'staff_gap_time';
+    return buildStaffGapTimeOptions(config, session, draft, service);
+  }
+  if (step === 'staff_gap_time') {
+    session.step = 'staff_gap_service';
+    return buildStaffAddServiceOptions(config);
+  }
+  if (step === 'staff_gap_service') {
+    session.step = 'staff_availability_change';
+    return renderStaffAvailabilityGaps(session);
+  }
+  if (step === 'staff_availability_change') {
+    if (Array.isArray(session.staffAvailabilityGaps) && session.staffAvailabilityGaps.length) {
+      session.staffAvailabilityGaps = null;
+      session.staffAvailability = {};
+      return buildStaffAvailabilityDateOptions(session);
+    }
+    session.staffAvailability = {};
+    session.staffAvailabilityGaps = null;
+    session.step = 'staff_ops_menu';
+    return buildStaffOpsMenu();
+  }
+  if (step === 'staff_add_confirm') {
+    session.step = draft.fromGap ? 'staff_gap_phone' : 'staff_add_phone';
+    return buildStaffAskPhone(draft);
+  }
+  if (step === 'staff_booking_actions') {
+    session.step = 'staff_lookup';
+    return withStaffBackAction('請輸入要查詢的預約編號，例如「001」。');
+  }
+  if (session.staffParentMenu === 'query') {
+    session.step = 'staff_query_menu';
+    return buildStaffQueryMenu();
+  }
+  session.step = 'staff_ops_menu';
+  return buildStaffOpsMenu();
 }
 
 function isStaffUser(userId) {
@@ -1119,6 +1179,21 @@ function handleStaffAvailability({ text, session, config }) {
   session.staffAvailability = session.staffAvailability || {};
   session.step = 'staff_availability_change';
 
+  if (/^\d+$/.test(String(text || '').trim()) && Array.isArray(session.staffAvailabilityGaps)) {
+    const gap = session.staffAvailabilityGaps[Number(text.trim()) - 1];
+    if (gap) {
+      session.staffAddBooking = {
+        fromGap: true,
+        artist: gap.artist,
+        date: gap.date,
+        gapStart: gap.start,
+        gapEnd: gap.end,
+      };
+      session.step = 'staff_gap_service';
+      return buildStaffAddServiceOptions(config);
+    }
+  }
+
   const optionIndex = Number(String(text || '').trim()) - 1;
   const optionDate = Array.isArray(session.staffAvailabilityDateOptions)
     ? session.staffAvailabilityDateOptions[optionIndex]
@@ -1131,9 +1206,19 @@ function handleStaffAvailability({ text, session, config }) {
   if (!gaps.length) {
     return withStaffBackAction(`${formatDateWithWeekday(date)} 目前沒有連續空檔。`);
   }
+  session.staffAvailabilityGaps = gaps;
+  return renderStaffAvailabilityGaps(session);
+}
+
+function renderStaffAvailabilityGaps(session) {
+  const gaps = session.staffAvailabilityGaps || [];
+  const date = session.staffAvailability?.date || gaps[0]?.date || '';
+  if (!gaps.length) return buildStaffAvailabilityDateOptions(session);
   return withStaffBackAction([
     `${formatDateWithWeekday(date)} 連續空檔：`,
-    ...gaps.map((gap) => `${gap.start}｜${gap.artist}｜空檔 ${formatDuration(gap.duration)}`),
+    ...gaps.map((gap, index) => `${index + 1}. ${gap.start}-${gap.end}｜${gap.artist}｜空檔 ${formatDuration(gap.duration)}`),
+    '',
+    '請選擇要安排預約的空檔。',
   ].join('\n'));
 }
 
@@ -1169,13 +1254,13 @@ function findStaffOpenGaps(config, date) {
       if (segmentStart === null) {
         segmentStart = minutes;
       } else if (previous !== null && minutes !== previous + slotMinutes) {
-        gaps.push({ artist, start: minutesToTime(segmentStart), duration: previous + slotMinutes - segmentStart });
+        gaps.push({ artist, date, start: minutesToTime(segmentStart), end: minutesToTime(previous + slotMinutes), duration: previous + slotMinutes - segmentStart });
         segmentStart = minutes;
       }
       previous = minutes;
     });
     if (segmentStart !== null && previous !== null) {
-      gaps.push({ artist, start: minutesToTime(segmentStart), duration: previous + slotMinutes - segmentStart });
+      gaps.push({ artist, date, start: minutesToTime(segmentStart), end: minutesToTime(previous + slotMinutes), duration: previous + slotMinutes - segmentStart });
     }
   });
   return gaps
@@ -1229,9 +1314,97 @@ function buildStaffAddTimeOptions(config, session, draft, service) {
   ].join('\n'));
 }
 
+function buildStaffGapTimeOptions(config, session, draft, service) {
+  const duration = Number(service?.duration || 0);
+  const slotMinutes = Number(config.settings?.slot_minutes || 30);
+  const start = timeToMinutes(draft.gapStart);
+  const end = timeToMinutes(draft.gapEnd);
+  const options = [];
+  for (let minutes = start; minutes + duration <= end; minutes += slotMinutes) {
+    options.push({ date: draft.date, time: minutesToTime(minutes), artist: draft.artist });
+  }
+  session.staffSlotOptions = options;
+  if (!options.length) {
+    session.step = 'staff_gap_service';
+    return withStaffBackAction('這段空檔放不下此服務，請換其他服務或空檔。');
+  }
+  return withStaffBackAction([
+    `${draft.artist} ${formatDateWithWeekday(draft.date)} ${draft.gapStart}-${draft.gapEnd}`,
+    `請選擇「${service.name}」開始時間：`,
+    ...options.map((slot, index) => `${index + 1}. ${slot.time}`),
+  ].join('\n'));
+}
+
+function buildStaffAskName() {
+  return withStaffBackAction([
+    '請輸入客人稱呼。',
+    '1. 跳過',
+  ].join('\n'));
+}
+
+function buildStaffAskPhone(draft = {}) {
+  return withStaffBackAction([
+    `客人稱呼：${draft.customerName || '未填'}`,
+    '請輸入手機，或跳過。',
+    '1. 跳過',
+  ].join('\n'));
+}
+
+function buildStaffAddConfirm(draft, service) {
+  return [
+    '請確認是否新增這筆預約：',
+    `客人：${draft.customerName || '現場客'}`,
+    `電話：${draft.phone || '未填'}`,
+    `服務：${service.name}`,
+    `美甲師：${draft.artist}`,
+    `時間：${draft.date} ${draft.time}`,
+    '',
+    '1. 確認新增',
+    '2. 取消新增',
+    '9. 回上一層',
+    '0. 店家模式',
+  ].join('\n');
+}
+
 async function handleStaffAddBooking({ userId, text, session, config }) {
   session.staffAddBooking = session.staffAddBooking || {};
   const draft = session.staffAddBooking;
+
+  if (session.step === 'staff_gap_service') {
+    const services = (config.services || []).slice(0, 10);
+    const selected = services[Number(text.trim()) - 1] || findService(config.services, text);
+    if (!selected) return buildStaffAddServiceOptions(config);
+    draft.service = selected.name;
+    session.step = 'staff_gap_time';
+    return buildStaffGapTimeOptions(config, session, draft, selected);
+  }
+
+  if (session.step === 'staff_gap_time') {
+    const service = findService(config.services, draft.service);
+    const slot = session.staffSlotOptions?.[Number(text.trim()) - 1] || null;
+    if (!slot) return buildStaffGapTimeOptions(config, session, draft, service);
+    draft.time = slot.time;
+    session.step = 'staff_gap_name';
+    return buildStaffAskName();
+  }
+
+  if (session.step === 'staff_gap_name') {
+    if (!isSkipStaffContactText(text)) draft.customerName = String(text || '').trim();
+    session.step = 'staff_gap_phone';
+    return buildStaffAskPhone(draft);
+  }
+
+  if (session.step === 'staff_gap_phone') {
+    if (!isSkipStaffContactText(text)) {
+      const phone = extractTaiwanMobile(text);
+      if (!phone) return withStaffBackAction(['手機號碼格式不正確，請輸入 09 開頭的 10 碼手機號碼，或跳過。', '1. 跳過'].join('\n'));
+      draft.phone = phone;
+    }
+    draft.customerName = draft.customerName || '現場客';
+    const service = findService(config.services, draft.service);
+    session.step = 'staff_add_confirm';
+    return buildStaffAddConfirm(draft, service);
+  }
 
   if (session.step === 'staff_add_service') {
     const services = (config.services || []).slice(0, 10);
@@ -1266,32 +1439,26 @@ async function handleStaffAddBooking({ userId, text, session, config }) {
     draft.date = slot.date;
     draft.time = slot.time;
     draft.artist = slot.artist;
-    session.step = 'staff_add_contact';
-    return withStaffBackAction('請輸入客人姓名與手機，例如「王小美 0912345678」。');
+    session.step = 'staff_add_name';
+    return buildStaffAskName();
   }
 
-  if (session.step === 'staff_add_contact') {
-    mergeStaffContactData(draft, text, config);
-    if (!draft.customerName || !draft.phone) return withStaffBackAction('請輸入客人姓名與手機，例如「王小美 0912345678」。');
-    if (!isValidTaiwanMobile(draft.phone)) {
-      draft.phone = '';
-      return withStaffBackAction('手機號碼格式不正確，請輸入 09 開頭的 10 碼手機號碼。');
+  if (session.step === 'staff_add_name') {
+    if (!isSkipStaffContactText(text)) draft.customerName = String(text || '').trim();
+    session.step = 'staff_add_phone';
+    return buildStaffAskPhone(draft);
+  }
+
+  if (session.step === 'staff_add_phone') {
+    if (!isSkipStaffContactText(text)) {
+      const phone = extractTaiwanMobile(text);
+      if (!phone) return withStaffBackAction(['手機號碼格式不正確，請輸入 09 開頭的 10 碼手機號碼，或跳過。', '1. 跳過'].join('\n'));
+      draft.phone = phone;
     }
+    draft.customerName = draft.customerName || '現場客';
     const service = findService(config.services, draft.service);
     session.step = 'staff_add_confirm';
-    return [
-      '請確認是否新增這筆預約：',
-      `客人：${draft.customerName}`,
-      `電話：${draft.phone}`,
-      `服務：${service.name}`,
-      `美甲師：${draft.artist}`,
-      `時間：${draft.date} ${draft.time}`,
-      '',
-      '1. 確認新增',
-      '2. 取消新增',
-      '9. 回上一層',
-      '0. 店家模式',
-    ].join('\n');
+    return buildStaffAddConfirm(draft, service);
   }
 
   if (session.step === 'staff_add_confirm' && isConfirmRescheduleText(text)) {
@@ -1333,18 +1500,18 @@ async function handleStaffAddBooking({ userId, text, session, config }) {
   mergeStaffContactData(session.staffAddBooking, text, config);
   const service = findService(config.services, draft.service);
 
-  if (!draft.date || !draft.time || !service || !draft.artist || !draft.customerName || !draft.phone) {
+  if (!draft.date || !draft.time || !service || !draft.artist) {
     session.step = 'staff_add_change';
     return withStaffBackAction([
-      '請補齊新增預約資料：日期、時間、服務、美甲師、姓名、手機。',
-      '例如：5/21 16:00 單色 Amy 王小美 0912345678',
+      '請補齊新增預約資料：日期、時間、服務、美甲師。',
+      '例如：5/21 16:00 單色 Amy',
       '',
       formatStaffAddDraft(draft),
     ].join('\n'));
   }
-  if (!isValidTaiwanMobile(draft.phone)) {
+  if (draft.phone && !isValidTaiwanMobile(draft.phone)) {
     draft.phone = '';
-    return withStaffBackAction('手機號碼格式不正確，請輸入 09 開頭的 10 碼手機號碼。');
+    return withStaffBackAction('手機號碼格式不正確，請輸入 09 開頭的 10 碼手機號碼，或跳過。');
   }
   const slots = findConsecutiveSlots(config.slots, draft, service, config.settings);
   if (!isBookingFarEnough(draft, config.settings) || !slots.length) {
@@ -1364,19 +1531,12 @@ async function handleStaffAddBooking({ userId, text, session, config }) {
 
   session.step = 'staff_add_confirm';
   draft.service = service.name;
-  return [
-    '請確認是否新增這筆預約：',
-    `客人：${draft.customerName}`,
-    `電話：${draft.phone}`,
-    `服務：${service.name}`,
-    `美甲師：${draft.artist}`,
-    `時間：${draft.date} ${draft.time}`,
-    '',
-    '1. 確認新增',
-    '2. 取消新增',
-    '9. 回上一層',
-    '0. 店家模式',
-  ].join('\n');
+  draft.customerName = draft.customerName || '現場客';
+  return buildStaffAddConfirm(draft, service);
+}
+
+function isSkipStaffContactText(text) {
+  return ['1', '跳過', '略過', '不填'].includes(String(text || '').trim());
 }
 
 function mergeStaffContactData(draft, text, config) {

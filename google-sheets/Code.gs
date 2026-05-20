@@ -825,12 +825,38 @@ function formatApiBooking_(booking) {
 }
 
 function storeCreateBooking_(ss, booking) {
-  if (!booking.customerName || !booking.phone) throw new Error('新增預約需要客人姓名與手機。');
-  const payload = Object.assign({}, booking, {
-    lineUserId: booking.lineUserId || '',
-    lineDisplayName: booking.lineDisplayName || '',
-  });
-  return createApiBooking_(ss, payload);
+  if (!booking.artist || !booking.service || !booking.date || !booking.time) throw new Error('新增預約資料不足');
+  if (booking.phone && !isValidTaiwanMobile_(booking.phone)) throw new Error('手機號碼格式不正確，請輸入 09 開頭的 10 碼手機號碼。');
+  const service = findService_(ss, booking.service, true);
+  const start = timeToMinutes_(booking.time);
+  const end = start + service.duration;
+  assertApiBookingFutureEnough_(ss, booking.date, start);
+  assertNoConflict_(ss, '', booking.artist, booking.date, start, end);
+  const warnings = getExceptionWarnings_(ss, booking.artist, booking.date, start, end);
+  assertSpecialAllowed_(warnings, '否');
+  const id = nextBookingId_(ss, booking.date);
+  const now = new Date();
+  const customerName = booking.customerName || '現場客';
+  const phone = booking.phone ? normalizeTaiwanMobile_(booking.phone) : '';
+  ss.getSheetByName(SHEETS.bookings).appendRow([
+    id, '已確認', '店家LINE', now, customerName, phone, booking.lineUserId || '', booking.lineDisplayName || '',
+    booking.artist, service.name, new Date(booking.date), minutesToTime_(start), minutesToTime_(end),
+    service.duration, buildNote_(booking.note || '', warnings), '', '未收款', '', now, '',
+  ]);
+  markBookedSlots_(ss, booking.artist, booking.date, start, end, id);
+  refreshApiBookingData_(ss);
+  SpreadsheetApp.flush();
+  return {
+    bookingId: id,
+    customerName,
+    phone,
+    service: service.name,
+    artist: booking.artist,
+    date: booking.date,
+    time: minutesToTime_(start),
+    end: minutesToTime_(end),
+    duration: service.duration,
+  };
 }
 
 function updateApiBooking_(ss, userId, booking) {
