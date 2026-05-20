@@ -679,13 +679,19 @@ async function handleStaffFlow({ userId, text, session, config }) {
   }
 
   if (session.step === 'staff_modify_menu') {
-    if (text === '1') return beginStaffReschedule(session, session.staffBooking);
-    if (text === '2') return buildStaffRescheduleArtistOptions(config, session);
+    if (text === '1') return buildStaffRescheduleArtistOptions(config, session);
+    if (text === '2') return beginStaffRescheduleButtonFlow(session, session.staffBooking, 'time', config);
+    if (text === '3') return beginStaffRescheduleServiceFlow(session, session.staffBooking, 'service', config);
+    if (text === '4') return beginStaffRescheduleServiceFlow(session, session.staffBooking, 'all', config);
     return withStaffBackAction('請選擇要修改的項目。');
   }
 
   if (session.step === 'staff_reschedule_artist') {
     return handleStaffRescheduleArtist({ text, session, config });
+  }
+
+  if (['staff_reschedule_service', 'staff_reschedule_date', 'staff_reschedule_period', 'staff_reschedule_time'].includes(session.step)) {
+    return handleStaffRescheduleButtonFlow({ text, session, config });
   }
 
   const dateLookup = parseStaffDateLookup(text, session);
@@ -859,8 +865,37 @@ function beginStaffModifyMenu(session, booking) {
     '請選擇要修改的項目：',
     formatStoreBooking(booking),
     '',
-    '1. 改時間',
-    '2. 改美甲師',
+    '1. 改美甲師',
+    '2. 改時間',
+    '3. 改服務項目',
+    '4. 全部修改',
+  ].join('\n'));
+}
+
+function beginStaffRescheduleButtonFlow(session, booking, mode, config) {
+  session.staffRescheduleMode = mode;
+  session.staffChange = {};
+  session.staffBooking = booking;
+  if (mode === 'time') {
+    session.step = 'staff_reschedule_date';
+    return buildStaffRescheduleDateOptions(config, session);
+  }
+  return beginStaffRescheduleServiceFlow(session, booking, mode, config);
+}
+
+function beginStaffRescheduleServiceFlow(session, booking, mode, config) {
+  session.staffRescheduleMode = mode;
+  session.staffChange = {};
+  session.staffBooking = booking;
+  session.step = 'staff_reschedule_service';
+  return buildStaffRescheduleServiceOptions(config);
+}
+
+function buildStaffRescheduleServiceOptions(config) {
+  const services = (config.services || []).slice(0, 10);
+  return withStaffBackAction([
+    '請選擇新的服務項目：',
+    ...services.map((service, index) => `${index + 1}. ${formatServiceMenuName(service)}｜${service.duration}分鐘`),
   ].join('\n'));
 }
 
@@ -881,6 +916,132 @@ function handleStaffRescheduleArtist({ text, session, config }) {
   if (!artist) return buildStaffRescheduleArtistOptions(config, session);
   session.staffChange = { artist: artist.name };
   return handleStaffRescheduleChange({ text: '', session, config });
+}
+
+function handleStaffRescheduleButtonFlow({ text, session, config }) {
+  const booking = session.staffBooking;
+  if (!booking) return withStaffBackAction('修改資訊已過期，請回上一層重新選擇。');
+  const change = session.staffChange || {};
+  const mode = session.staffRescheduleMode || 'time';
+
+  if (session.step === 'staff_reschedule_service') {
+    const services = (config.services || []).slice(0, 10);
+    const selected = services[Number(text.trim()) - 1] || findService(config.services, text);
+    if (!selected) return buildStaffRescheduleServiceOptions(config);
+    session.staffChange = { ...change, service: selected.name };
+    if (mode === 'service') return handleStaffRescheduleChange({ text: '', session, config });
+    session.step = 'staff_reschedule_date';
+    return buildStaffRescheduleDateOptions(config, session);
+  }
+
+  if (session.step === 'staff_reschedule_date') {
+    const service = getStaffRescheduleService(config, session);
+    const dates = getRescheduleDateOptions(config, session.staffBooking, session.staffChange || {}, service, mode === 'all').slice(0, 5);
+    const date = dates[Number(text.trim()) - 1] || parseDateText(text);
+    if (!date) return buildStaffRescheduleDateOptions(config, session);
+    session.staffChange = { ...change, date, time: '' };
+    session.step = 'staff_reschedule_period';
+    return buildStaffReschedulePeriodOptions(config, session);
+  }
+
+  if (session.step === 'staff_reschedule_period') {
+    const service = getStaffRescheduleService(config, session);
+    const periods = getReschedulePeriodOptions(config, session.staffBooking, session.staffChange || {}, service, mode === 'all');
+    const period = periods[Number(text.trim()) - 1] || parsePeriodText(text);
+    if (!period) return buildStaffReschedulePeriodOptions(config, session);
+    session.staffChange = { ...change, period, time: '' };
+    session.step = 'staff_reschedule_time';
+    return buildStaffRescheduleTimeOptions(config, session);
+  }
+
+  if (session.step === 'staff_reschedule_time') {
+    const slot = session.staffSlotOptions?.[Number(text.trim()) - 1] || null;
+    if (!slot) return buildStaffRescheduleTimeOptions(config, session);
+    session.staffChange = {
+      ...change,
+      date: slot.date,
+      time: slot.time,
+      artist: slot.artist,
+    };
+    return handleStaffRescheduleChange({ text: '', session, config });
+  }
+
+  return beginStaffModifyMenu(session, booking);
+}
+
+function getStaffRescheduleService(config, session) {
+  return findService(config.services, session.staffChange?.service || session.staffBooking?.service);
+}
+
+function getRescheduleCandidateArtists(config, booking, change, service, allowAnyArtist = false) {
+  if (allowAnyArtist && !change.artist) return getBookableArtists(config, service).map((artist) => artist.name);
+  return [change.artist || booking.artist].filter(Boolean);
+}
+
+function getRescheduleDateOptions(config, booking, change, service, allowAnyArtist = false) {
+  const artists = getRescheduleCandidateArtists(config, booking, change, service, allowAnyArtist);
+  const dates = artists.flatMap((artist) => findAvailableStartSlots(config.slots, {
+    ...booking,
+    ...change,
+    artist,
+    date: '',
+    period: '',
+    time: '',
+  }, service, config.settings, booking.id).map((slot) => slot.date));
+  return [...new Set(dates)].sort();
+}
+
+function getReschedulePeriodOptions(config, booking, change, service, allowAnyArtist = false) {
+  const artists = getRescheduleCandidateArtists(config, booking, change, service, allowAnyArtist);
+  const slots = artists.flatMap((artist) => findAvailableStartSlots(config.slots, {
+    ...booking,
+    ...change,
+    artist,
+    period: '',
+    time: '',
+  }, service, config.settings, booking.id));
+  return ['morning', 'afternoon', 'evening'].filter((period) => slots.some((slot) => isInPeriod(slot.time, period)));
+}
+
+function getRescheduleTimeOptions(config, booking, change, service, allowAnyArtist = false) {
+  const artists = getRescheduleCandidateArtists(config, booking, change, service, allowAnyArtist);
+  return artists.flatMap((artist) => findAvailableStartSlots(config.slots, {
+    ...booking,
+    ...change,
+    artist,
+    time: '',
+  }, service, config.settings, booking.id))
+    .sort(compareSlots);
+}
+
+function buildStaffRescheduleDateOptions(config, session) {
+  const service = getStaffRescheduleService(config, session);
+  const dates = getRescheduleDateOptions(config, session.staffBooking, session.staffChange || {}, service, session.staffRescheduleMode === 'all').slice(0, 5);
+  return withStaffBackAction([
+    '請選擇新的日期：',
+    ...dates.map((date, index) => `${index + 1}. ${formatDateWithWeekday(date)}`),
+  ].join('\n'));
+}
+
+function buildStaffReschedulePeriodOptions(config, session) {
+  const service = getStaffRescheduleService(config, session);
+  const periods = getReschedulePeriodOptions(config, session.staffBooking, session.staffChange || {}, service, session.staffRescheduleMode === 'all');
+  return withStaffBackAction([
+    '請選擇新的時段：',
+    ...periods.map((period, index) => `${index + 1}. ${periodLabel(period)}`),
+  ].join('\n'));
+}
+
+function buildStaffRescheduleTimeOptions(config, session) {
+  const service = getStaffRescheduleService(config, session);
+  const slots = getRescheduleTimeOptions(config, session.staffBooking, session.staffChange || {}, service, session.staffRescheduleMode === 'all').slice(0, 12);
+  session.staffSlotOptions = slots;
+  if (!slots.length) return withStaffBackAction('這個日期與時段目前沒有可修改的時間，請回上一層改日期或時段。');
+  const showArtist = session.staffRescheduleMode === 'all';
+  return withStaffBackAction([
+    '請選擇新的時間：',
+    ...slots.map((slot, index) => `${index + 1}. ${slot.time}${showArtist ? `｜${slot.artist}` : ''}`),
+  ].join('\n'));
 }
 
 function beginStaffCancel(session, booking) {
@@ -1024,6 +1185,7 @@ function resetStaffSession(session) {
   session.staffDateBookings = null;
   session.staffDateLookupDate = null;
   session.staffArtistOptions = null;
+  session.staffRescheduleMode = null;
 }
 
 function isStaffHomeText(text) {
@@ -2960,7 +3122,9 @@ function answerAvailabilityQuery(text, config, session, local) {
 }
 
 async function handleRescheduleFlow({ userId, text, ai, local, session, config }) {
-  const bookings = await loadUserActiveBookings(userId);
+  if (userId) session.userId = userId;
+  const effectiveUserId = userId || session.userId || '';
+  const bookings = await loadUserActiveBookings(effectiveUserId);
   if (!bookings.length) {
     session.step = 'start';
     session.booking = { service: '', artist: '', date: '', time: '', customerName: '', phone: '', note: '' };
@@ -2985,7 +3149,7 @@ async function handleRescheduleFlow({ userId, text, ai, local, session, config }
       return '修改資訊已過期，請重新選擇要更改的預約。';
     }
     try {
-      const result = await rescheduleBooking(userId, draft);
+      const result = await rescheduleBooking(effectiveUserId, draft);
       notifyShop(`預約已修改 ${result.bookingId}\n客人：${result.customerName}\n服務：${result.service}\n美甲師：${result.artist}\n時間：${result.date} ${result.time}`, config, 'reschedule').catch((error) => {
         console.error('notifyShop failed:', error.response?.data || error.message);
       });
@@ -3022,6 +3186,27 @@ async function handleRescheduleFlow({ userId, text, ai, local, session, config }
 
   if (target) session.rescheduleBooking = target;
   const booking = session.rescheduleBooking;
+  if (target || session.step === 'reschedule_menu') {
+    if (target) return beginCustomerModifyMenu(session, target);
+    if (session.rescheduleJustSelected) {
+      session.rescheduleJustSelected = false;
+      return buildCustomerModifyMenu(session.rescheduleBooking);
+    }
+    if (text === '1') return beginCustomerRescheduleArtist(session, config);
+    if (text === '2') return beginCustomerRescheduleButtonFlow(session, 'time', config);
+    if (text === '3') return beginCustomerRescheduleServiceFlow(session, 'service', config);
+    if (text === '4') return beginCustomerRescheduleServiceFlow(session, 'all', config);
+    return buildCustomerModifyMenu(session.rescheduleBooking);
+  }
+
+  if (session.step === 'reschedule_artist') {
+    return handleCustomerRescheduleArtist({ text, session, config });
+  }
+
+  if (['reschedule_service', 'reschedule_date', 'reschedule_period', 'reschedule_time'].includes(session.step)) {
+    return handleCustomerRescheduleButtonFlow({ text, session, config });
+  }
+
   if (session.step === 'reschedule_change' && /^\d+$/.test(text.trim()) && Array.isArray(session.rescheduleSlotOptions)) {
     const slot = session.rescheduleSlotOptions[Number(text.trim()) - 1];
     if (slot) {
@@ -3043,11 +3228,7 @@ async function handleRescheduleFlow({ userId, text, ai, local, session, config }
   };
 
   if (!change.service && !change.artist && !change.date && !change.time && !change.period) {
-    session.step = 'reschedule_change';
-    return [
-      `我找到預約編號 ${shortBookingId(booking.id)}號：${booking.date} ${booking.start}｜${booking.artist}｜${booking.service}`,
-      '請告訴我想改成什麼時間或內容，例如「改到 5/20 下午 4 點」。',
-    ].join('\n');
+    return beginCustomerModifyMenu(session, booking);
   }
 
   const service = findService(config.services, next.service);
@@ -3094,6 +3275,169 @@ async function handleRescheduleFlow({ userId, text, ai, local, session, config }
     '',
     '1. 確認修改',
     '2. 取消修改',
+    '0. 回首頁',
+  ].join('\n');
+}
+
+function beginCustomerModifyMenu(session, booking) {
+  session.step = 'reschedule_menu';
+  session.rescheduleBooking = booking;
+  session.rescheduleChange = {};
+  session.rescheduleDraft = null;
+  return buildCustomerModifyMenu(booking);
+}
+
+function buildCustomerModifyMenu(booking) {
+  return [
+    `我找到預約編號 ${shortBookingId(booking.id)}號：${booking.date} ${booking.start}｜${booking.artist}｜${booking.service}`,
+    '請選擇要修改的項目：',
+    '1. 改美甲師',
+    '2. 改時間',
+    '3. 改服務項目',
+    '4. 全部修改',
+    '0. 回首頁',
+  ].join('\n');
+}
+
+function beginCustomerRescheduleArtist(session, config) {
+  const artists = (config.artists || []).filter((artist) => artist.active !== false);
+  session.step = 'reschedule_artist';
+  session.rescheduleArtistOptions = artists;
+  return [
+    '請選擇新的美甲師：',
+    ...artists.map((artist, index) => `${index + 1}. ${artist.name}`),
+    '0. 回首頁',
+  ].join('\n');
+}
+
+function handleCustomerRescheduleArtist({ text, session, config }) {
+  const artists = Array.isArray(session.rescheduleArtistOptions) ? session.rescheduleArtistOptions : [];
+  const selected = artists[Number(String(text || '').trim()) - 1] || null;
+  const artist = selected || (config.artists || []).find((item) => item.name === String(text || '').trim());
+  if (!artist) return beginCustomerRescheduleArtist(session, config);
+  session.rescheduleChange = { artist: artist.name };
+  session.step = 'reschedule_change';
+  return handleRescheduleFlow({
+    userId: session.userId || '',
+    text: '',
+    ai: emptyAi(),
+    local: { booking: {} },
+    session,
+    config,
+  });
+}
+
+function beginCustomerRescheduleButtonFlow(session, mode, config) {
+  session.rescheduleMode = mode;
+  session.rescheduleChange = {};
+  if (mode === 'time') {
+    session.step = 'reschedule_date';
+    return buildCustomerRescheduleDateOptions(config, session);
+  }
+  return beginCustomerRescheduleServiceFlow(session, mode, config);
+}
+
+function beginCustomerRescheduleServiceFlow(session, mode, config) {
+  session.rescheduleMode = mode;
+  session.rescheduleChange = {};
+  session.step = 'reschedule_service';
+  return buildCustomerRescheduleServiceOptions(config);
+}
+
+function buildCustomerRescheduleServiceOptions(config) {
+  const services = (config.services || []).slice(0, 10);
+  return [
+    '請選擇新的服務項目：',
+    ...services.map((service, index) => `${index + 1}. ${formatServiceMenuName(service)}｜${service.duration}分鐘`),
+    '0. 回首頁',
+  ].join('\n');
+}
+
+function handleCustomerRescheduleButtonFlow({ text, session, config }) {
+  const booking = session.rescheduleBooking;
+  const change = session.rescheduleChange || {};
+  const mode = session.rescheduleMode || 'time';
+  if (!booking) return '修改資訊已過期，請重新選擇要更改的預約。';
+
+  if (session.step === 'reschedule_service') {
+    const services = (config.services || []).slice(0, 10);
+    const selected = services[Number(text.trim()) - 1] || findService(config.services, text);
+    if (!selected) return buildCustomerRescheduleServiceOptions(config);
+    session.rescheduleChange = { ...change, service: selected.name };
+    if (mode === 'service') {
+      session.step = 'reschedule_change';
+      return handleRescheduleFlow({ userId: session.userId || '', text: '', ai: emptyAi(), local: { booking: {} }, session, config });
+    }
+    session.step = 'reschedule_date';
+    return buildCustomerRescheduleDateOptions(config, session);
+  }
+
+  if (session.step === 'reschedule_date') {
+    const service = findService(config.services, change.service || booking.service);
+    const dates = getRescheduleDateOptions(config, booking, change, service, mode === 'all').slice(0, 5);
+    const date = dates[Number(text.trim()) - 1] || parseDateText(text);
+    if (!date) return buildCustomerRescheduleDateOptions(config, session);
+    session.rescheduleChange = { ...change, date, time: '' };
+    session.step = 'reschedule_period';
+    return buildCustomerReschedulePeriodOptions(config, session);
+  }
+
+  if (session.step === 'reschedule_period') {
+    const service = findService(config.services, change.service || booking.service);
+    const periods = getReschedulePeriodOptions(config, booking, change, service, mode === 'all');
+    const period = periods[Number(text.trim()) - 1] || parsePeriodText(text);
+    if (!period) return buildCustomerReschedulePeriodOptions(config, session);
+    session.rescheduleChange = { ...change, period, time: '' };
+    session.step = 'reschedule_time';
+    return buildCustomerRescheduleTimeOptions(config, session);
+  }
+
+  if (session.step === 'reschedule_time') {
+    const slot = session.rescheduleSlotOptions?.[Number(text.trim()) - 1] || null;
+    if (!slot) return buildCustomerRescheduleTimeOptions(config, session);
+    session.rescheduleChange = { ...change, date: slot.date, time: slot.time, artist: slot.artist };
+    session.step = 'reschedule_change';
+    return handleRescheduleFlow({ userId: session.userId || '', text: '', ai: emptyAi(), local: { booking: {} }, session, config });
+  }
+
+  return buildCustomerModifyMenu(booking);
+}
+
+function buildCustomerRescheduleDateOptions(config, session) {
+  const booking = session.rescheduleBooking;
+  const change = session.rescheduleChange || {};
+  const service = findService(config.services, change.service || booking.service);
+  const dates = getRescheduleDateOptions(config, booking, change, service, session.rescheduleMode === 'all').slice(0, 5);
+  return [
+    '請選擇新的日期：',
+    ...dates.map((date, index) => `${index + 1}. ${formatDateWithWeekday(date)}`),
+    '0. 回首頁',
+  ].join('\n');
+}
+
+function buildCustomerReschedulePeriodOptions(config, session) {
+  const booking = session.rescheduleBooking;
+  const change = session.rescheduleChange || {};
+  const service = findService(config.services, change.service || booking.service);
+  const periods = getReschedulePeriodOptions(config, booking, change, service, session.rescheduleMode === 'all');
+  return [
+    '請選擇新的時段：',
+    ...periods.map((period, index) => `${index + 1}. ${periodLabel(period)}`),
+    '0. 回首頁',
+  ].join('\n');
+}
+
+function buildCustomerRescheduleTimeOptions(config, session) {
+  const booking = session.rescheduleBooking;
+  const change = session.rescheduleChange || {};
+  const service = findService(config.services, change.service || booking.service);
+  const slots = getRescheduleTimeOptions(config, booking, change, service, session.rescheduleMode === 'all').slice(0, 12);
+  session.rescheduleSlotOptions = slots;
+  if (!slots.length) return '這個日期與時段目前沒有可修改的時間，請回上一層改日期或時段。';
+  const showArtist = session.rescheduleMode === 'all';
+  return [
+    '請選擇新的時間：',
+    ...slots.map((slot, index) => `${index + 1}. ${slot.time}${showArtist ? `｜${slot.artist}` : ''}`),
     '0. 回首頁',
   ].join('\n');
 }
@@ -3389,7 +3733,8 @@ function shouldSkipAi(text, session, local) {
 function isStepOptionNumber(text, session) {
   if (!/^\d+$/.test(String(text || '').trim())) return false;
   if (String(text || '').trim() === '0') return false;
-  return ['ask_service', 'ask_service_detail', 'ask_artist', 'ask_time', 'reschedule_change'].includes(session.step);
+  return ['ask_service', 'ask_service_detail', 'ask_artist', 'ask_time',
+    'reschedule_select', 'reschedule_menu', 'reschedule_artist', 'reschedule_service', 'reschedule_date', 'reschedule_period', 'reschedule_time', 'reschedule_change'].includes(session.step);
 }
 
 async function handleOptionNumberSelection({ userId, profile, text, session, config }) {
@@ -3417,14 +3762,10 @@ async function handleOptionNumberSelection({ userId, profile, text, session, con
   }
 
   if (beforeStep === 'reschedule_select' && session.rescheduleBooking) {
-    const booking = session.rescheduleBooking;
-    return [
-      `我找到預約編號 ${shortBookingId(booking.id)}號：${booking.date} ${booking.start}｜${booking.artist}｜${booking.service}`,
-      '請告訴我想改成什麼時間或內容，例如「改到 5/20 下午 4 點」。',
-    ].join('\n');
+    return beginCustomerModifyMenu(session, session.rescheduleBooking);
   }
 
-  if (beforeStep === 'reschedule_change') {
+  if (beforeStep.startsWith('reschedule')) {
     return runConversation({ userId, profile, text, ai: emptyAi(), session, config, local: { booking: {} } });
   }
 
@@ -3520,13 +3861,14 @@ function applyQuickReplyNumber(text, session, config) {
     const target = session.rescheduleOptions[index];
     if (target) {
       session.rescheduleBooking = target;
-      session.step = 'reschedule_change';
+      session.step = 'reschedule_menu';
+      session.rescheduleJustSelected = true;
     }
   }
 }
 
 function inferOptionNumberFromAi(ai, session) {
-  if (!session?.step?.startsWith('ask_') && !['cancel_select', 'reschedule_select'].includes(session?.step)) return 0;
+  if (!session?.step?.startsWith('ask_') && !['cancel_select'].includes(session?.step) && !session?.step?.startsWith('reschedule')) return 0;
   const optionNumber = Number(ai?.selectedOptionNumber || 0);
   if (optionNumber > 0 && optionNumber <= (session.lastOptions || []).length) return optionNumber;
   if (ai?.selectedOptionLabel) return findOptionNumberByLabel(ai.selectedOptionLabel, session);
@@ -3534,7 +3876,7 @@ function inferOptionNumberFromAi(ai, session) {
 }
 
 function inferOptionNumberFromText(text, session) {
-  if (!session?.step?.startsWith('ask_') && !['cancel_select', 'reschedule_select'].includes(session?.step)) return 0;
+  if (!session?.step?.startsWith('ask_') && !['cancel_select'].includes(session?.step) && !session?.step?.startsWith('reschedule')) return 0;
   const value = String(text || '').trim();
   if (!value || /^\d+$/.test(value)) return 0;
 

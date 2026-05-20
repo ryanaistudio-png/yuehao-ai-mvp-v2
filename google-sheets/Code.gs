@@ -285,6 +285,7 @@ function setupEditSheet_(ss) {
     ['執行結果', '', '系統自動填'],
   ]);
   sheet.getRange('A1:C1').setFontColor('#b91c1c').setFontWeight('bold').setBackground('#fee2e2');
+  sheet.getRange('B2').setNumberFormat('@');
   sheet.getRange('B6').setNumberFormat('yyyy-mm-dd');
   sheet.getRange('B7').setNumberFormat('hh:mm');
   styleKeyValueSheet_(sheet, 11);
