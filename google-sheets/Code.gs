@@ -62,6 +62,7 @@ function onEdit(e) {
   const row = e.range.getRow();
   const col = e.range.getColumn();
   if (name === SHEETS.week && row === 2 && col === 2) buildWeekView_(getAppSpreadsheet_());
+  if (name === SHEETS.week && row === 4 && col === 2) handleWeekCommand_(sheet);
   if (name === SHEETS.add && row === 12 && col === 2) handleAddCommand_(sheet);
   if (name === SHEETS.edit && row === 10 && col === 2) handleEditCommand_(sheet);
   if (name === SHEETS.query && row === 2 && [2, 5].includes(col)) buildBookingQuery_(getAppSpreadsheet_());
@@ -82,6 +83,14 @@ function doPost(e) {
     }
 
     if (payload.action === 'getConfig') return jsonResponse_({ ok: true, data: getApiConfig_(ss) });
+    if (payload.action === 'refreshSystemData') {
+      refreshSystemData(false);
+      return jsonResponse_({ ok: true, data: { message: 'updated' } });
+    }
+    if (payload.action === 'applyV3Layout') {
+      applyV3Layout();
+      return jsonResponse_({ ok: true, data: { message: 'layout_applied' } });
+    }
     if (payload.action === 'createBooking') return jsonResponse_({ ok: true, data: createApiBooking_(ss, payload.booking || {}) });
     if (payload.action === 'getUserActiveBookings') return jsonResponse_({ ok: true, data: getApiUserActiveBookings_(ss, payload.userId || '') });
     if (payload.action === 'getCustomerProfile') return jsonResponse_({ ok: true, data: getApiCustomerProfile_(ss, payload.userId || '') });
@@ -204,14 +213,17 @@ function isSheetEmpty_(sheet) {
 function setupWeekView_(ss) {
   const sheet = ss.getSheetByName(SHEETS.week);
   resetSheetForLayout_(sheet);
-  sheet.getRange('A1:H1').breakApart();
-  sheet.getRange(1, 1, 2, 8).setValues([
+  sheet.getRange(1, 1, 5, 8).setValues([
     ['此表主要供查看。新增請到 02，修改/取消/延時請到 03。', '', '', '', '', '', '', ''],
-    ['查看週別', '本週', '', '', '', '', '', ''],
+    ['查看週別', '本週', '手機可直接輸入：本週、下週、下下週', '', '', '', '', ''],
+    ['預約編號', '', '要標記完成時填寫', '', '', '', '', ''],
+    ['手機操作', '未執行', '可輸入：更新預約畫面、套用 v3 安全版面、標記完成', '', '', '', '', ''],
+    ['執行結果', '', '', '', '', '', '', ''],
   ]);
-  sheet.getRange('A1:H1').merge().setFontColor('#b91c1c').setFontWeight('bold').setBackground('#fee2e2');
+  sheet.getRange('A1:H1').setFontColor('#b91c1c').setFontWeight('bold').setBackground('#fee2e2');
   sheet.getRange('A2:B2').setBackground('#f8fafc');
-  sheet.setFrozenRows(2);
+  sheet.getRange('A3:B5').setBackground('#f8fafc');
+  sheet.setFrozenRows(6);
   sheet.setFrozenColumns(1);
   sheet.setColumnWidths(1, 8, 135);
 }
@@ -265,13 +277,12 @@ function setupEditSheet_(ss) {
 function setupQuerySheet_(ss) {
   const sheet = ss.getSheetByName(SHEETS.query);
   resetSheetForLayout_(sheet);
-  sheet.getRange('A1:K1').breakApart();
   sheet.getRange(1, 1, 3, 11).setValues([
     ['此表僅供查詢，請不要直接修改。新增到 02，修改/取消/延時到 03。', '', '', '', '', '', '', '', '', '', ''],
     ['查看月份', '全部', '', '查看狀態', '全部', '', '', '', '', '', ''],
     ['預約編號', '狀態', '服務日期', '開始時間', '結束時間', '美甲師', '服務', '客人姓名', '電話', '來源', '備註'],
   ]);
-  sheet.getRange('A1:K1').merge().setFontColor('#b91c1c').setFontWeight('bold').setBackground('#fee2e2');
+  sheet.getRange('A1:K1').setFontColor('#b91c1c').setFontWeight('bold').setBackground('#fee2e2');
   sheet.getRange('A3:K3').setBackground('#111827').setFontColor('#ffffff').setFontWeight('bold');
   sheet.setFrozenRows(3);
   sheet.setColumnWidths(1, 11, 125);
@@ -298,12 +309,11 @@ function setupBookings_(ss, withDemo) {
 
 function ensureBookingDatabaseLayout_(ss) {
   const sheet = ss.getSheetByName(SHEETS.bookings);
-  sheet.getRange('A1:T1').breakApart();
   sheet.getRange(1, 1, 2, 20).setValues([
     ['此表為系統資料庫，請不要直接修改。新增請到 02，修改/取消/延時請到 03。', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', ''],
     ['預約編號', '狀態', '來源', '建立時間', '客人姓名', '電話', 'LINE userId', 'LINE 顯示名稱', '美甲師', '服務', '服務日期', '開始時間', '結束時間', '服務分鐘', '備註', '完成確認時間', '付款狀態', '實收金額', '更新時間', '取消時間'],
   ]);
-  sheet.getRange('A1:T1').merge().setFontColor('#b91c1c').setFontWeight('bold').setBackground('#fee2e2');
+  sheet.getRange('A1:T1').setFontColor('#b91c1c').setFontWeight('bold').setBackground('#fee2e2');
   sheet.getRange('A2:T2').setBackground('#111827').setFontColor('#ffffff').setFontWeight('bold');
   sheet.setFrozenRows(2);
   sheet.setColumnWidths(1, 20, 125);
@@ -483,6 +493,9 @@ function handleWeekCommand_(sheet) {
     if (command === '更新預約畫面') {
       refreshSystemData(false);
       sheet.getRange('B5').setValue('執行成功：已更新預約畫面。');
+    } else if (command === '套用 v3 安全版面') {
+      applyV3Layout();
+      ss.getSheetByName(SHEETS.week).getRange('B5').setValue('執行成功：已套用 v3 安全版面。');
     } else if (command === '標記完成') {
       const id = sheet.getRange('B3').getValue();
       markBookingCompleted_(ss, id);
@@ -1087,8 +1100,8 @@ function buildWeekView_(ss) {
     });
   const artists = [...artistMap.values()].sort((a, b) => a.sort - b.sort || a.name.localeCompare(b.name));
 
-  sheet.getRange('A3:H500').clearContent().clearFormat().clearDataValidations();
-  let row = 3;
+  sheet.getRange('A6:H500').clearContent().clearFormat().clearDataValidations();
+  let row = 6;
   const statusRanges = [];
   sheet.getRange(row, 1, 1, 8).setValues([['時間', ...days.map((date) => `${getWeekday_(date)}\n${formatDate_(date)}`)]]);
   styleHeader_(sheet.getRange(row, 1, 1, 8));
@@ -1478,7 +1491,8 @@ function refreshDropdowns_() {
   createNamedRange_(ss, '美甲師全店選項', SHEETS.options, 'O2:O200');
   createNamedRange_(ss, '服務選項', SHEETS.services, 'A2:A500');
 
-  applyValidation_(ss, SHEETS.week, 'B2', '週別選項');
+  ss.getSheetByName(SHEETS.week).getRange('B2').clearDataValidations();
+  applyValidation_(ss, SHEETS.week, 'B4', '完成指令選項');
   applyValidation_(ss, SHEETS.add, 'B2', '美甲師選項');
   applyValidation_(ss, SHEETS.add, 'B3', '服務選項');
   applyDateValidation_(ss, SHEETS.add, 'B4');
@@ -1511,7 +1525,7 @@ function refreshDropdowns_() {
 function buildOptionRows_() {
   const cols = [
     ['週別', '本週', '下週', '下下週'],
-    ['完成指令', '未執行', '標記完成', '更新預約畫面'],
+    ['完成指令', '未執行', '標記完成', '更新預約畫面', '套用 v3 安全版面'],
     ['新增指令', '未執行', '執行現場新增', '更新預約畫面'],
     ['修改指令', '未執行', '載入預約', '修改預約', '延長時間', '取消預約', '更新預約畫面'],
     ['是否', '是', '否'],
@@ -1570,7 +1584,9 @@ function sortAndColorSheets_(ss) {
 function freezeFirstColumnAllSheets_(ss) {
   Object.values(SHEETS).forEach((name) => {
     const sheet = ss.getSheetByName(name);
-    if (sheet) sheet.setFrozenColumns(1);
+    if (!sheet) return;
+    sheet.getDataRange().getMergedRanges().forEach((range) => range.breakApart());
+    sheet.setFrozenColumns(1);
   });
 }
 
@@ -1637,7 +1653,7 @@ function styleHeader_(range) {
 }
 
 function styleBand_(range, color) {
-  range.merge().setBackground(color || '#dbeafe').setFontWeight('bold');
+  range.setBackground(color || '#dbeafe').setFontWeight('bold');
 }
 
 function artistBandColor_(index) {
