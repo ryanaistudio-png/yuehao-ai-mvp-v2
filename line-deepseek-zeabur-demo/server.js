@@ -86,6 +86,16 @@ async function handleEvent(event) {
       return;
     }
 
+    if (isFastStaffMenuText(text)) {
+      const session = getSession(userId, cache.data || {});
+      rememberUserMessage(session, text);
+      const answer = handleFastStaffMenuText(text, session);
+      if (answer) {
+        await replyWithMemory(event, userId, session, answer);
+        return;
+      }
+    }
+
     config = await loadConfig();
     let session = getSession(userId, config);
     rememberUserMessage(session, text);
@@ -869,6 +879,36 @@ function isExpectedBookingLookupError(error) {
   return message.includes('找不到預約編號') || message.includes('找到多筆短編號') || message.includes('請輸入預約編號');
 }
 
+function isFastStaffMenuText(text) {
+  const value = String(text || '').trim();
+  return value === '店家'
+    || value === '店家模式'
+    || value === '預約查詢'
+    || value === '現場操作'
+    || value === '今日預約'
+    || value === '1'
+    || value === '2'
+    || value === '3';
+}
+
+function handleFastStaffMenuText(text, session) {
+  const value = String(text || '').trim();
+  if (value === '店家' || value === '店家模式') {
+    resetStaffSession(session);
+    session.step = 'staff_menu';
+    return buildStaffMenu();
+  }
+  if (value === '預約查詢' || (value === '2' && session.step === 'staff_menu')) {
+    session.step = 'staff_query_menu';
+    return buildStaffQueryMenu();
+  }
+  if (value === '現場操作' || (value === '3' && session.step === 'staff_menu')) {
+    session.step = 'staff_ops_menu';
+    return buildStaffOpsMenu();
+  }
+  return '';
+}
+
 function isStaffCommandText(text, session) {
   if (session.step?.startsWith('staff_')) return true;
   return text === '店家'
@@ -1280,7 +1320,7 @@ function buildStaffAddServiceOptions(config) {
   const services = (config.services || []).slice(0, 10);
   return withStaffBackAction([
     '請選擇服務項目：',
-    ...services.map((service, index) => `${index + 1}. ${formatServiceMenuName(service)}`),
+    ...services.map((service, index) => `${index + 1}. ${formatServiceMenuName(service)}｜${service.duration}分鐘`),
   ].join('\n'));
 }
 
@@ -1389,7 +1429,14 @@ async function handleStaffAddBooking({ userId, text, session, config }) {
   }
 
   if (session.step === 'staff_gap_name') {
-    if (!isSkipStaffContactText(text)) draft.customerName = String(text || '').trim();
+    if (isSkipStaffContactText(text)) {
+      draft.customerName = '現場客';
+      draft.phone = '';
+      const service = findService(config.services, draft.service);
+      session.step = 'staff_add_confirm';
+      return buildStaffAddConfirm(draft, service);
+    }
+    draft.customerName = String(text || '').trim();
     session.step = 'staff_gap_phone';
     return buildStaffAskPhone(draft);
   }
@@ -1444,7 +1491,14 @@ async function handleStaffAddBooking({ userId, text, session, config }) {
   }
 
   if (session.step === 'staff_add_name') {
-    if (!isSkipStaffContactText(text)) draft.customerName = String(text || '').trim();
+    if (isSkipStaffContactText(text)) {
+      draft.customerName = '現場客';
+      draft.phone = '';
+      const service = findService(config.services, draft.service);
+      session.step = 'staff_add_confirm';
+      return buildStaffAddConfirm(draft, service);
+    }
+    draft.customerName = String(text || '').trim();
     session.step = 'staff_add_phone';
     return buildStaffAskPhone(draft);
   }
@@ -3587,7 +3641,10 @@ function buildQuickReplyFromText(text) {
 
 function toQuickReplyLabel(label) {
   const text = String(label || '').trim();
-  return text.replace(/\s+\d+\s*分(?:\s+.*)?$/, '').trim();
+  return text
+    .replace(/｜\d+\s*分鐘(?:\s+.*)?$/, '')
+    .replace(/\s+\d+\s*分(?:\s+.*)?$/, '')
+    .trim();
 }
 
 function addQuickReplyEmoji(label) {
