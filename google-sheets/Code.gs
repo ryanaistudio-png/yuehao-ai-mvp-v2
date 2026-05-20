@@ -59,11 +59,12 @@ function onEdit(e) {
   if (!e || !e.range) return;
   const sheet = e.range.getSheet();
   const name = sheet.getName();
-  const cell = e.range.getA1Notation();
-  if (name === SHEETS.week && cell === 'B2') buildWeekView_(getAppSpreadsheet_());
-  if (name === SHEETS.add && cell === 'B12') handleAddCommand_(sheet);
-  if (name === SHEETS.edit && cell === 'B8') handleEditCommand_(sheet);
-  if (name === SHEETS.query && ['B2', 'D2'].includes(cell)) buildBookingQuery_(getAppSpreadsheet_());
+  const row = e.range.getRow();
+  const col = e.range.getColumn();
+  if (name === SHEETS.week && row === 2 && col === 2) buildWeekView_(getAppSpreadsheet_());
+  if (name === SHEETS.add && row === 12 && col === 2) handleAddCommand_(sheet);
+  if (name === SHEETS.edit && row === 10 && col === 2) handleEditCommand_(sheet);
+  if (name === SHEETS.query && row === 2 && [2, 5].includes(col)) buildBookingQuery_(getAppSpreadsheet_());
   if ([SHEETS.artists, SHEETS.fixed, SHEETS.special, SHEETS.services, SHEETS.settings].includes(name) && e.range.getRow() >= 2) {
     refreshSystemData(false);
   }
@@ -208,6 +209,7 @@ function setupWeekView_(ss) {
   sheet.getRange('A1:H1').merge().setFontColor('#b91c1c').setFontWeight('bold').setBackground('#fee2e2');
   sheet.getRange('A2:B2').setBackground('#f8fafc');
   sheet.setFrozenRows(2);
+  sheet.setFrozenColumns(1);
   sheet.setColumnWidths(1, 8, 135);
 }
 
@@ -238,21 +240,23 @@ function setupAddSheet_(ss) {
 function setupEditSheet_(ss) {
   const sheet = ss.getSheetByName(SHEETS.edit);
   resetSheetForLayout_(sheet);
-  sheet.getRange(1, 1, 9, 3).setValues([
-    ['重要提醒', '先輸入預約編號並載入資料，再修改時間、延時或取消。', ''],
+  sheet.getRange(1, 1, 11, 3).setValues([
+    ['重要提醒', '先輸入預約編號並載入資料，再修改服務、美甲師、時間、調整分鐘或取消。', ''],
     ['預約編號', '', '建議輸入完整編號，例如 202606-001；短編號重複時系統會提示'],
     ['目前預約資訊', '', '載入後自動顯示'],
-    ['新日期', '', '修改時間時填寫'],
-    ['新開始時間', '', '修改時間時填寫'],
+    ['新美甲師', '', '修改美甲師時填寫；空白則沿用原本'],
+    ['新服務', '', '修改服務時填寫；空白則沿用原本'],
+    ['新日期', '', '修改日期/時間時填寫；空白則沿用原本'],
+    ['新開始時間', '', '修改日期/時間時填寫；空白則沿用原本'],
     ['調整分鐘', '', '延長填正數，縮短填負數'],
     ['允許特殊時段', '否', '預設否；遇休假、非營業、已過時間需改成是再執行'],
-    ['執行指令', '未執行', '未執行 / 載入預約 / 修改時間 / 延長時間 / 取消預約 / 更新預約畫面'],
+    ['執行指令', '未執行', '未執行 / 載入預約 / 修改預約 / 延長時間 / 取消預約 / 更新預約畫面'],
     ['執行結果', '', '系統自動填'],
   ]);
   sheet.getRange('A1:C1').setFontColor('#b91c1c').setFontWeight('bold').setBackground('#fee2e2');
-  sheet.getRange('B4').setNumberFormat('yyyy-mm-dd');
-  sheet.getRange('B5').setNumberFormat('hh:mm');
-  styleKeyValueSheet_(sheet, 9);
+  sheet.getRange('B6').setNumberFormat('yyyy-mm-dd');
+  sheet.getRange('B7').setNumberFormat('hh:mm');
+  styleKeyValueSheet_(sheet, 11);
 }
 
 function setupQuerySheet_(ss) {
@@ -513,13 +517,13 @@ function handleAddCommand_(sheet) {
 }
 
 function handleEditCommand_(sheet) {
-  const command = String(sheet.getRange('B8').getValue() || '').trim();
+  const command = String(sheet.getRange('B10').getValue() || '').trim();
   if (!command || command === '未執行') return;
   const ss = getAppSpreadsheet_();
   try {
     if (command === '更新預約畫面') {
       refreshSystemData(false);
-      sheet.getRange('B9').setValue('執行成功：已更新預約畫面。');
+      sheet.getRange('B11').setValue('執行成功：已更新預約畫面。');
       return;
     }
     const id = sheet.getRange('B2').getValue();
@@ -527,33 +531,33 @@ function handleEditCommand_(sheet) {
       const found = resolveBookingRow_(ss, id);
       const booking = parseBookingRow_(found.values);
       fillEditCurrentBooking_(sheet, booking);
-      sheet.getRange('B9').setValue(`已載入預約 ${shortBookingId_(booking.id)}號。`);
+      sheet.getRange('B11').setValue(`已載入預約 ${shortBookingId_(booking.id)}號。`);
       return;
     }
-    if (command === '修改時間') {
+    if (command === '修改預約' || command === '修改時間') {
       updateBookingTime_(ss, readEditForm_(sheet));
       refreshSystemData(false);
-      sheet.getRange('B9').setValue('執行成功：已修改預約時間。');
+      sheet.getRange('B11').setValue('執行成功：已修改預約。');
       return;
     }
     if (command === '延長時間') {
       extendBooking_(ss, readEditForm_(sheet));
       refreshSystemData(false);
-      sheet.getRange('B9').setValue('執行成功：已延長預約時間。');
+      sheet.getRange('B11').setValue('執行成功：已調整預約時間。');
       return;
     }
     if (command === '取消預約') {
       cancelManualBooking_(ss, id);
       refreshSystemData(false);
-      sheet.getRange('B9').setValue(`執行成功：已取消 ${shortBookingId_(id)}號。`);
+      sheet.getRange('B11').setValue(`執行成功：已取消 ${shortBookingId_(id)}號。`);
       return;
     }
     throw new Error('請選擇有效指令。');
   } catch (error) {
-    sheet.getRange('B9').setValue(`執行失敗：${error.message}`);
+    sheet.getRange('B11').setValue(`執行失敗：${error.message}`);
   } finally {
-    sheet.getRange('B8').setValue('未執行');
-    sheet.getRange('B7').setValue('否');
+    sheet.getRange('B10').setValue('未執行');
+    sheet.getRange('B9').setValue('否');
   }
 }
 
@@ -574,17 +578,22 @@ function readAddForm_(sheet) {
 function readEditForm_(sheet) {
   return {
     id: sheet.getRange('B2').getValue(),
-    newDate: sheet.getRange('B4').getValue(),
-    newStartTime: normalizeTimeText_(sheet.getRange('B5').getValue()),
-    extendMinutes: Number(sheet.getRange('B6').getValue() || 0),
-    allowSpecial: String(sheet.getRange('B7').getValue() || '否'),
+    newArtist: sheet.getRange('B4').getValue(),
+    newService: sheet.getRange('B5').getValue(),
+    newDate: sheet.getRange('B6').getValue(),
+    newStartTime: normalizeTimeText_(sheet.getRange('B7').getValue()),
+    extendMinutes: Number(sheet.getRange('B8').getValue() || 0),
+    allowSpecial: String(sheet.getRange('B9').getValue() || '否'),
   };
 }
 
 function fillEditCurrentBooking_(sheet, booking) {
   sheet.getRange('B3').setValue(`${booking.id}｜${booking.status}｜${booking.date} ${booking.startTime}-${booking.endTime}｜${booking.artist}｜${booking.service}｜${booking.customer}`);
-  sheet.getRange('B4').setValue(booking.dateValue);
-  sheet.getRange('B5').setValue(booking.startTime);
+  sheet.getRange('B4').setValue(booking.artist);
+  sheet.getRange('B5').setValue(booking.service);
+  sheet.getRange('B6').setValue(booking.dateValue);
+  sheet.getRange('B7').setValue(booking.startTime);
+  sheet.getRange('B8').clearContent();
 }
 
 function createManualBooking_(ss, values) {
@@ -611,22 +620,28 @@ function createManualBooking_(ss, values) {
 
 function updateBookingTime_(ss, values) {
   if (!values.id) throw new Error('請輸入預約編號。');
-  if (!values.newDate || !values.newStartTime) throw new Error('請填新日期與新開始時間。');
   const found = resolveBookingRow_(ss, values.id);
   const old = parseBookingRow_(found.values);
-  const start = timeToMinutes_(values.newStartTime);
-  const end = start + old.duration;
-  assertNoConflict_(ss, old.id, old.artist, values.newDate, start, end);
-  const warnings = getExceptionWarnings_(ss, old.artist, values.newDate, start, end);
+  const artist = values.newArtist || old.artist;
+  const service = findService_(ss, values.newService || old.service, true);
+  const date = values.newDate || old.dateValue;
+  const startTime = values.newStartTime || old.startTime;
+  if (!artist || !service || !date || !startTime) throw new Error('請至少載入預約，並確認美甲師、服務、日期與時間。');
+  const activeArtist = readArtists_(ss).find((item) => item.name === artist && item.status === '可接單');
+  if (!activeArtist) throw new Error('這位美甲師目前不可接單。');
+  const start = timeToMinutes_(startTime);
+  const end = start + service.duration;
+  assertNoConflict_(ss, old.id, artist, date, start, end);
+  const warnings = getExceptionWarnings_(ss, artist, date, start, end);
   assertSpecialAllowed_(warnings, values.allowSpecial);
   const sheet = ss.getSheetByName(SHEETS.bookings);
-  const newId = bookingMonthPrefix_(old.id) === bookingMonthPrefix_(nextBookingId_(ss, values.newDate))
+  const newId = bookingMonthPrefix_(old.id) === bookingMonthPrefix_(nextBookingId_(ss, date))
     ? old.id
-    : nextBookingId_(ss, values.newDate);
+    : nextBookingId_(ss, date);
   sheet.getRange(found.rowNumber, 1, 1, 20).setValues([[
     newId, '已確認', old.source, old.createdAt, old.customer, old.phone, old.lineUserId, old.lineDisplayName,
-    old.artist, old.service, values.newDate, minutesToTime_(start), minutesToTime_(end),
-    old.duration, buildNote_(old.note, warnings), '', old.paymentStatus, old.paidAmount, new Date(), '',
+    artist, service.name, date, minutesToTime_(start), minutesToTime_(end),
+    service.duration, buildNote_(old.note, warnings), '', old.paymentStatus, old.paidAmount, new Date(), '',
   ]]);
 }
 
@@ -1075,6 +1090,7 @@ function buildWeekView_(ss) {
   sheet.getRange(row, 1, 1, 8).setValues([['時間', ...days.map((date) => `${getWeekday_(date)}\n${formatDate_(date)}`)]]);
   styleHeader_(sheet.getRange(row, 1, 1, 8));
   sheet.setFrozenRows(3);
+  sheet.setFrozenColumns(1);
   row += 1;
 
   artists.forEach((artist, artistIndex) => {
@@ -1466,11 +1482,13 @@ function refreshDropdowns_() {
   applyValidation_(ss, SHEETS.add, 'B5', '時間選項');
   applyValidation_(ss, SHEETS.add, 'B7', '是否選項');
   applyValidation_(ss, SHEETS.add, 'B12', '新增指令選項');
-  applyDateValidation_(ss, SHEETS.edit, 'B4');
-  applyValidation_(ss, SHEETS.edit, 'B5', '時間選項');
-  applyValidation_(ss, SHEETS.edit, 'B6', '延時選項');
-  applyValidation_(ss, SHEETS.edit, 'B7', '是否選項');
-  applyValidation_(ss, SHEETS.edit, 'B8', '修改指令選項');
+  applyValidation_(ss, SHEETS.edit, 'B4', '美甲師選項');
+  applyValidation_(ss, SHEETS.edit, 'B5', '服務選項');
+  applyDateValidation_(ss, SHEETS.edit, 'B6');
+  applyValidation_(ss, SHEETS.edit, 'B7', '時間選項');
+  applyValidation_(ss, SHEETS.edit, 'B8', '延時選項');
+  applyValidation_(ss, SHEETS.edit, 'B9', '是否選項');
+  applyValidation_(ss, SHEETS.edit, 'B10', '修改指令選項');
   applyValidation_(ss, SHEETS.query, 'B2', '月份選項');
   applyValidation_(ss, SHEETS.query, 'E2', '狀態查詢選項');
   applyValidation_(ss, SHEETS.services, 'D2:E500', '是否選項');
@@ -1492,7 +1510,7 @@ function buildOptionRows_() {
     ['週別', '本週', '下週', '下下週'],
     ['完成指令', '未執行', '標記完成', '更新預約畫面'],
     ['新增指令', '未執行', '執行現場新增', '更新預約畫面'],
-    ['修改指令', '未執行', '載入預約', '修改時間', '延長時間', '取消預約', '更新預約畫面'],
+    ['修改指令', '未執行', '載入預約', '修改預約', '延長時間', '取消預約', '更新預約畫面'],
     ['是否', '是', '否'],
     ['時間', ...buildTimeOptions_()],
     ['調整分鐘', 30, 60, -30, -60],
