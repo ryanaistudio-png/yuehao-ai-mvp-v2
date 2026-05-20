@@ -480,8 +480,7 @@ async function handleCancelFlow({ userId, text, ai, session, config }) {
     session.cancelOptions = bookings;
     return [
       '請選擇要取消的預約：',
-      ...bookings.map((booking) => `預約編號 ${shortBookingId(booking.id)}號：${booking.date} ${booking.start}｜${booking.artist}｜${booking.service}`),
-      '請直接回覆要取消的預約編號，例如「006」。',
+      ...bookings.map((booking, index) => `${index + 1}. ${shortBookingId(booking.id)}號｜${booking.date} ${booking.start}｜${booking.artist}｜${booking.service}`),
     ].join('\n');
   }
 
@@ -3190,8 +3189,7 @@ async function handleRescheduleFlow({ userId, text, ai, local, session, config }
       '您是想更改已預約的時間嗎？我先幫您查詢目前的預約。',
       '',
       '您目前有以下預約：',
-      ...bookings.map((booking) => `預約編號 ${shortBookingId(booking.id)}號：${booking.date} ${booking.start}｜${booking.artist}｜${booking.service}`),
-      '請回覆要更改的預約編號，例如「006」。',
+      ...bookings.map((booking, index) => `${index + 1}. ${shortBookingId(booking.id)}號｜${booking.date} ${booking.start}｜${booking.artist}｜${booking.service}`),
     ].join('\n');
   }
 
